@@ -1,0 +1,25 @@
+name: sota_inspired_v1
+type: architectures
+version: 1.0.0
+description: >
+  Competition-winning architecture combining encoder-decoder U-Net skip
+  connections, gated residuals, 3x MLP expansion, multiscale attention windows,
+  SmearGate, BigramHash, and TrigramHash. Declarative YAML spec with 11 layers
+  and orthogonal init.
+author: eren23
+tags:
+  - architecture
+  - sota
+  - competition
+  - parameter-golf
+  - declarative
+  - yaml-spec
+  - u-net-skip
+  - augmentations
+config:
+  MODEL_FAMILY: sota_inspired_v1
+  NUM_LAYERS: 11
+  MLP_MULT: 3
+  SMEAR_GATE: true
+  BIGRAM_HASH: true
+  TRIGRAM_HASH: true

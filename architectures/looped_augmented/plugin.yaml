@@ -1,0 +1,23 @@
+name: looped_augmented
+type: architectures
+version: 1.0.0
+description: >
+  Declarative looped transformer with SmearGate and BigramHash augmentations.
+  Uses weight-shared recurrence (12 logical steps, 3 unique blocks) for
+  parameter efficiency. Composed via YAML spec — no custom Python needed.
+author: eren23
+tags:
+  - architecture
+  - looped
+  - recurrence
+  - declarative
+  - yaml-spec
+  - parameter-efficient
+  - augmentations
+config:
+  MODEL_FAMILY: looped_augmented
+  RECURRENCE_STEPS: 12
+  SHARE_BLOCKS: 3
+  SMEAR_GATE: true
+  BIGRAM_HASH: true
+  ORTHO_INIT: true

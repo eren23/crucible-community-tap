@@ -1,0 +1,21 @@
+name: moe_baseline
+type: architectures
+version: 1.0.0
+description: >
+  Mixture of Experts transformer replacing dense MLP with top-k routed experts.
+  Retains U-Net skip connections and standard attention. Adds load-balancing
+  auxiliary loss. Configurable expert count and top-k routing.
+author: eren23
+tags:
+  - architecture
+  - moe
+  - mixture-of-experts
+  - parameter-golf
+  - u-net-skip
+config:
+  MODEL_FAMILY: moe_baseline
+  NUM_LAYERS: 9
+  MODEL_DIM: 512
+  NUM_HEADS: 8
+  MOE_NUM_EXPERTS: 4
+  MOE_TOP_K: 2

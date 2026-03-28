@@ -1,0 +1,27 @@
+name: sota_partial_rope
+type: architectures
+version: 1.0.0
+description: >
+  SOTA architecture with partial RoPE — rotary embeddings applied to only first
+  rope_dims of each head. Includes encoder-decoder skip connections, GQA, gated
+  residuals, SmearGate, BigramHash, TrigramHash, and orthogonal init. Derived
+  from top parameter-golf competition submissions.
+author: eren23
+tags:
+  - architecture
+  - partial-rope
+  - sota
+  - parameter-golf
+  - competition
+  - u-net-skip
+  - augmentations
+config:
+  MODEL_FAMILY: sota_partial_rope
+  NUM_LAYERS: 11
+  MODEL_DIM: 512
+  NUM_HEADS: 8
+  ROPE_DIMS: 16
+  SMEAR_GATE: true
+  BIGRAM_HASH: true
+  TRIGRAM_HASH: true
+  ORTHO_INIT: true
