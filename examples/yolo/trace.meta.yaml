@@ -1,0 +1,24 @@
+session_id: yolo-demo-example
+trace_version: 1
+started_at: '2026-03-28T12:19:00Z'
+ended_at: '2026-03-28T12:26:40Z'
+tool_calls: 8
+tool_counts:
+  list_projects: 1
+  provision_project: 1
+  fleet_refresh: 1
+  bootstrap_project: 1
+  run_project: 1
+  get_fleet_status: 1
+  collect_project_results: 1
+  destroy_nodes: 1
+trace_file: yolo-demo-example.jsonl
+description: >
+  End-to-end YOLO object detection demo. Provisions an RTX 4090 on RunPod,
+  clones Ultralytics, trains YOLOv8n on COCO8 for 10 epochs, collects
+  mAP metrics, and tears down the pod. Total wall time ~7 minutes.
+results:
+  precision_b: 0.67885
+  recall_b: 0.75
+  map50_b: 0.77217
+  map50_95_b: 0.60557
