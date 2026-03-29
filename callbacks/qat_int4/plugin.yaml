@@ -1,0 +1,6 @@
+name: qat_int4
+type: callbacks
+version: "0.1.0"
+description: INT4 quantization-aware training with per-group scales via straight-through estimator
+author: eren23
+tags: [compression, quantization, qat, int4]

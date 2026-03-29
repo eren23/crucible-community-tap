@@ -1,0 +1,6 @@
+name: sigreg
+type: objectives
+version: "0.1.0"
+description: SIGReg Gaussian regularizer — Cramér-Wold based collapse prevention for JEPA models
+author: eren23
+tags: [world-model, jepa, regularization, sigreg, lewm]

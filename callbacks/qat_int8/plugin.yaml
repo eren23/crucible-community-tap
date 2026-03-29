@@ -1,0 +1,6 @@
+name: qat_int8
+type: callbacks
+version: "0.1.0"
+description: INT8 quantization-aware training via straight-through estimator
+author: eren23
+tags: [compression, quantization, qat, int8]

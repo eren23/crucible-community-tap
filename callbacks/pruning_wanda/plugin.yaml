@@ -1,0 +1,6 @@
+name: pruning_wanda
+type: callbacks
+version: "0.1.0"
+description: Wanda pruning using weight-activation product scores with optional N:M structured sparsity
+author: eren23
+tags: [compression, pruning, wanda, structured, unstructured]

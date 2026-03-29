@@ -1,0 +1,6 @@
+name: lewm
+type: architectures
+version: "0.1.0"
+description: LE-WM world model — ViT encoder + DiT predictor with AdaLN, end-to-end JEPA training without EMA
+author: eren23
+tags: [world-model, jepa, lewm, vit, dit, architecture]

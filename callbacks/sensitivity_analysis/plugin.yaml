@@ -1,0 +1,6 @@
+name: sensitivity_analysis
+type: callbacks
+version: "0.1.0"
+description: Per-layer importance scoring via Fisher information for guided pruning decisions
+author: eren23
+tags: [compression, analysis, sensitivity, fisher, pruning]

@@ -1,0 +1,6 @@
+name: cem_eval
+type: callbacks
+version: "0.1.0"
+description: Cross-Entropy Method planner evaluation — measures goal-reaching success rate for world models
+author: eren23
+tags: [world-model, evaluation, planning, cem, jepa]

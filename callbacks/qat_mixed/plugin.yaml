@@ -1,0 +1,6 @@
+name: qat_mixed
+type: callbacks
+version: "0.1.0"
+description: Mixed-precision quantization-aware training with per-module bit-width assignment
+author: eren23
+tags: [compression, quantization, qat, mixed-precision]

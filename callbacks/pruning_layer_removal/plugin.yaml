@@ -1,0 +1,6 @@
+name: pruning_layer_removal
+type: callbacks
+version: "0.1.0"
+description: ShortGPT-style layer removal via angular distance redundancy metric
+author: eren23
+tags: [compression, pruning, layer-removal, structured, shortgpt]

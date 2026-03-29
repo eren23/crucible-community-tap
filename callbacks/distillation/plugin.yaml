@@ -1,0 +1,6 @@
+name: distillation
+type: callbacks
+version: "0.1.0"
+description: Knowledge distillation callback — teacher-student training with temperature-scaled KL divergence
+author: eren23
+tags: [compression, distillation, knowledge-distillation, teacher-student]

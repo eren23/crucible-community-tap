@@ -1,0 +1,6 @@
+name: compression_metrics
+type: callbacks
+version: "0.1.0"
+description: Track sparsity, effective bits, compression ratio, and model size during training
+author: eren23
+tags: [compression, metrics, monitoring]

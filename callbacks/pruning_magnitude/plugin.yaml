@@ -1,0 +1,6 @@
+name: pruning_magnitude
+type: callbacks
+version: "0.1.0"
+description: Gradual magnitude pruning with configurable schedule (one-shot, linear, cubic)
+author: eren23
+tags: [compression, pruning, magnitude, unstructured]

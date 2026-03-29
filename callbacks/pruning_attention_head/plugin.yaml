@@ -1,0 +1,6 @@
+name: pruning_attention_head
+type: callbacks
+version: "0.1.0"
+description: Attention head pruning via Taylor importance scoring
+author: eren23
+tags: [compression, pruning, attention, head-pruning, structured]

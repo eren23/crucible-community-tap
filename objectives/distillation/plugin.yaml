@@ -1,0 +1,6 @@
+name: distillation
+type: objectives
+version: "0.1.0"
+description: Knowledge distillation objective for generic backend — KL divergence with temperature scaling
+author: eren23
+tags: [compression, distillation, knowledge-distillation, objective]

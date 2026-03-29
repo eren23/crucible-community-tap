@@ -1,0 +1,6 @@
+name: trajectory_hdf5
+type: data_adapters
+version: "0.1.0"
+description: HDF5 trajectory data adapter for world model training (frames + actions + optional goals)
+author: eren23
+tags: [world-model, data, hdf5, trajectory, jepa]
