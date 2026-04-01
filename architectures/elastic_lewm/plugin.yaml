@@ -1,0 +1,6 @@
+name: elastic_lewm
+type: architectures
+version: "0.1.0"
+description: Elastic LE-WM — difficulty-aware compute routing for world models. Nested weight-sharing with Gumbel-Softmax budget selection, width/depth elasticity, two-stage training with KD. Inspired by Nemotron Elastic.
+author: eren23
+tags: [world-model, jepa, lewm, elastic, routing, difficulty-aware, architecture]

@@ -1,0 +1,6 @@
+name: hybrid_lewm
+type: architectures
+version: "0.1.0"
+description: Hybrid LE-WM — latency-optimal encoder mixing ViT attention with bidirectional linear attention (ELU+1 kernel). Configurable block patterns, meta tokens, weight normalization. Inspired by Nemotron-Flash.
+author: eren23
+tags: [world-model, jepa, lewm, hybrid, linear-attention, latency-optimal, architecture]

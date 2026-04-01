@@ -1,0 +1,6 @@
+name: elastic_lewm_upstream
+type: launchers
+version: "0.1.0"
+description: Upstream launcher for elastic LE-WM — runs inside lucas-maes/le-wm workspace with elastic encoder/predictor and DifficultyRouter. Two-stage training with KD sandwich.
+author: eren23
+tags: [world-model, lewm, elastic, launcher, upstream]

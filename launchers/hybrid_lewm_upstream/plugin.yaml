@@ -1,0 +1,6 @@
+name: hybrid_lewm_upstream
+type: launchers
+version: "0.1.0"
+description: Upstream launcher for hybrid LE-WM — runs inside lucas-maes/le-wm workspace with HybridViTEncoder replacing HF ViT. Supports PRECOMPUTED_DATASET fast path.
+author: eren23
+tags: [world-model, lewm, hybrid, launcher, upstream]
