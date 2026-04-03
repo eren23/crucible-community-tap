@@ -615,6 +615,16 @@ class HybridLeWMModel(CrucibleModel):
     def modality(cls) -> str:
         return "world_model"
 
+    # Torch backend compatibility
+    @property
+    def lm_head(self) -> None:
+        """World models don't have an lm_head like language models."""
+        return None
+
+    def token_parameter_names(self) -> set[str]:
+        """World models don't have token embeddings."""
+        return set()
+
 
 # ---------------------------------------------------------------------------
 # Factory + registration
@@ -629,7 +639,8 @@ def _build_hybrid_lewm(args: Any) -> HybridLeWMModel:
         embed_dim=int(getattr(args, "model_dim", os.environ.get("MODEL_DIM", "192"))),
         encoder_depth=int(getattr(args, "encoder_depth", os.environ.get("ENCODER_DEPTH", "6"))),
         encoder_heads=int(getattr(args, "encoder_heads", os.environ.get("ENCODER_HEADS", "3"))),
-        block_pattern=str(getattr(args, "block_pattern", os.environ.get("HYBRID_ENCODER_PATTERN", "ALALAL"))),
+        # Prefer HYBRID_ENCODER_PATTERN env var, fall back to args.block_pattern (which may be empty)
+        block_pattern=str(os.environ.get("HYBRID_ENCODER_PATTERN", "") or getattr(args, "block_pattern", "ALALAL") or "ALALAL"),
         meta_tokens=int(getattr(args, "meta_tokens", os.environ.get("META_TOKENS", "4"))),
         linear_attn_eps=float(getattr(args, "linear_attn_eps", os.environ.get("LINEAR_ATTN_EPS", "1e-6"))),
         predictor_depth=int(getattr(args, "predictor_depth", os.environ.get("PREDICTOR_DEPTH", "6"))),
