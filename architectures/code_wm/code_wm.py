@@ -103,11 +103,37 @@ class PositionalEncoding(nn.Module):
 # State Encoder -- byte-level code tokens to latent embedding
 # ---------------------------------------------------------------------------
 
-class CodeStateEncoder(nn.Module):
-    """Encode byte-level token IDs to a dense latent vector.
+class AttentionPooling(nn.Module):
+    """Learned attention readout: query a learnable vector against sequence.
 
-    Pipeline: Embedding -> PositionalEncoding -> LoopedTransformerBlock x loops
-              -> MeanPool -> LayerNorm -> [B, D]
+    A single learnable query vector attends to all positions, producing a
+    weighted sum that focuses on the most informative tokens. Much better
+    than mean pooling for code edits where ~1% of tokens change.
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.attn = nn.MultiheadAttention(dim, num_heads=1, batch_first=True)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """x: [B, S, D] -> [B, D]"""
+        B = x.shape[0]
+        q = self.query.expand(B, -1, -1)  # [B, 1, D]
+        out, _ = self.attn(q, x, x, need_weights=False)  # [B, 1, D]
+        return out.squeeze(1)  # [B, D]
+
+
+class CodeStateEncoder(nn.Module):
+    """Encode AST token IDs to a dense latent vector.
+
+    Pipeline: Embedding -> PositionalEncoding -> CLS token prepend
+              -> LoopedTransformerBlock x loops -> Readout -> LayerNorm
+
+    Readout mode (WM_POOL_MODE env var):
+      - "cls":  Extract CLS token (position 0) after transformer
+      - "attn": Learned attention pooling over all positions (default)
+      - "mean": Mean pooling (legacy, loses edit signal)
     """
 
     def __init__(
@@ -121,8 +147,12 @@ class CodeStateEncoder(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
+        self.model_dim = model_dim
         self.embedding = nn.Embedding(vocab_size, model_dim)
-        self.pos_enc = PositionalEncoding(model_dim, max_len=max_seq_len, dropout=dropout)
+        self.pos_enc = PositionalEncoding(model_dim, max_len=max_seq_len + 1, dropout=dropout)
+
+        # Learnable CLS token (prepended to sequence)
+        self.cls_token = nn.Parameter(torch.randn(1, 1, model_dim) * 0.02)
 
         # Single transformer block, iterated encoder_loops times (weight-shared)
         self.block = LoopedTransformerBlock(
@@ -132,6 +162,10 @@ class CodeStateEncoder(nn.Module):
             dropout=dropout,
         )
         self.encoder_loops = encoder_loops
+
+        # Readout options
+        self.pool_mode = os.environ.get("WM_POOL_MODE", "attn")
+        self.attn_pool = AttentionPooling(model_dim) if self.pool_mode == "attn" else None
 
         self.norm = nn.LayerNorm(model_dim)
 
@@ -144,19 +178,28 @@ class CodeStateEncoder(nn.Module):
         Returns:
             [B, model_dim] latent embedding
         """
-        # Token embedding + positional encoding
-        h = self.embedding(x)          # [B, S, D]
-        h = self.pos_enc(h)            # [B, S, D]
+        B = x.shape[0]
+
+        # Token embedding + CLS prepend
+        h = self.embedding(x)                              # [B, S, D]
+        cls = self.cls_token.expand(B, -1, -1)              # [B, 1, D]
+        h = torch.cat([cls, h], dim=1)                      # [B, S+1, D]
+        h = self.pos_enc(h)                                 # [B, S+1, D]
 
         # Looped transformer passes (weight-shared)
         for _ in range(self.encoder_loops):
-            h = self.block(h)          # [B, S, D]
+            h = self.block(h)                               # [B, S+1, D]
 
-        # Mean pooling over sequence dimension
-        h = h.mean(dim=1)             # [B, D]
+        # Readout
+        if self.pool_mode == "cls":
+            h = h[:, 0]                                     # [B, D] — CLS token
+        elif self.pool_mode == "attn":
+            h = self.attn_pool(h)                           # [B, D] — attention readout
+        else:
+            h = h.mean(dim=1)                               # [B, D] — mean pool (legacy)
 
         # Final normalization
-        h = self.norm(h)              # [B, D]
+        h = self.norm(h)                                    # [B, D]
         return h
 
 
