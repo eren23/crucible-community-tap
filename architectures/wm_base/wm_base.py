@@ -221,6 +221,25 @@ class WorldModelBase(CrucibleModel):
             dropout=self.dropout_rate,
         )
 
+        # Prediction projector (BYOL/VICReg pattern):
+        # Projects predictions and targets through an MLP before MSE.
+        # This prevents the encoder from collapsing to trivial solutions
+        # where before ≈ after in latent space (common when inputs share
+        # 90%+ of their tokens).
+        proj_dim = self.model_dim * 2
+        self.pred_projector = nn.Sequential(
+            nn.Linear(self.model_dim, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            nn.GELU(),
+            nn.Linear(proj_dim, self.model_dim),
+        )
+        self.target_projector = nn.Sequential(
+            nn.Linear(self.model_dim, proj_dim),
+            nn.BatchNorm1d(proj_dim),
+            nn.GELU(),
+            nn.Linear(proj_dim, self.model_dim),
+        )
+
     @abstractmethod
     def build_state_encoder(self, args: Any) -> nn.Module:
         """Build the domain-specific state encoder.
@@ -316,15 +335,30 @@ class WorldModelBase(CrucibleModel):
 
         pred_embeddings = torch.stack(pred_list, dim=1)  # [B, T-1, D]
 
-        # Prediction loss: MSE in latent space
-        pred_loss = F.mse_loss(pred_embeddings, z_target)
+        # Project predictions and targets through MLP heads (BYOL pattern).
+        # This prevents encoder collapse where before ≈ after.
+        pred_flat = pred_embeddings.reshape(-1, self.model_dim)
+        target_flat = z_target.reshape(-1, self.model_dim)
+        proj_pred = self.pred_projector(pred_flat)      # [B*(T-1), D]
+        proj_target = self.target_projector(target_flat) # [B*(T-1), D]
 
-        # Inline variance regularization
+        # Prediction loss: MSE on projected embeddings (L2-normalized)
+        proj_pred_n = F.normalize(proj_pred, dim=-1)
+        proj_target_n = F.normalize(proj_target, dim=-1)
+        pred_loss = F.mse_loss(proj_pred_n, proj_target_n)
+
+        # Variance regularization: prevent embedding collapse
         z_flat = z_all.reshape(-1, self.model_dim)  # [B*T, D]
         var_reg, z_std = self._compute_var_reg(z_flat)
 
+        # Covariance regularization (VICReg): decorrelate embedding dimensions
+        z_centered = z_flat - z_flat.mean(dim=0)
+        cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
+        # Off-diagonal elements should be zero
+        cov_loss = (cov.fill_diagonal_(0).pow(2).sum() / self.model_dim)
+
         # Total loss
-        loss = pred_loss + self.sigreg_weight * var_reg
+        loss = pred_loss + self.sigreg_weight * (var_reg + 0.04 * cov_loss)
 
         # Update EMA target encoder
         if self.training:
@@ -334,6 +368,7 @@ class WorldModelBase(CrucibleModel):
             "loss": loss,
             "pred_loss": pred_loss,
             "var_reg": var_reg,
+            "cov_loss": cov_loss,
             "pred_embeddings": pred_embeddings,
             "target_embeddings": z_target,
             "z_std": z_std,

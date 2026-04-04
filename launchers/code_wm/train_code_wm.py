@@ -176,6 +176,7 @@ def main():
         loss_val = out["loss"].item()
         pred_loss = out["pred_loss"].item()
         var_reg = out["var_reg"].item()
+        cov_loss = out.get("cov_loss", torch.tensor(0.0)).item()
 
         if loss_val < best_loss:
             best_loss = loss_val
@@ -183,7 +184,8 @@ def main():
         if use_wandb and step % 10 == 0:
             wandb.log({
                 "train/loss": loss_val, "train/pred_loss": pred_loss,
-                "train/var_reg": var_reg, "train/grad_norm": grad_norm,
+                "train/var_reg": var_reg, "train/cov_loss": cov_loss,
+                "train/grad_norm": grad_norm,
                 "train/lr": optimizer.param_groups[0]["lr"],
             }, step=step)
 
