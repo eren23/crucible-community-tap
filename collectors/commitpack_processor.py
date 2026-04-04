@@ -41,6 +41,7 @@ from typing import Any
 import numpy as np
 
 from .ast_tokenizer import ast_tokenize, get_vocab_size
+from .ast_diff import compute_rich_action, ACTION_DIM_RICH
 from .base import BaseCollector, CollectionStats
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ class CommitPackProcessor(BaseCollector):
         use_ft: bool = True,
         context_window: int = 512,
         max_file_size: int = 50_000,
+        rich_actions: bool = False,
         **kwargs: Any,
     ) -> CollectionStats:
         """Download and preprocess CommitPack Python data.
@@ -253,6 +255,10 @@ class CommitPackProcessor(BaseCollector):
         max_file_size:
             Skip samples where either old or new content exceeds this
             character count. Default 50000.
+        rich_actions:
+            If ``True``, use 15-dim AST diff action vectors instead of
+            7-dim. Captures structural change details (added/removed/modified
+            functions, imports, control flow, etc.). Default ``False``.
         """
         from datasets import load_dataset
 
@@ -330,8 +336,11 @@ class CommitPackProcessor(BaseCollector):
             before_tokens = ast_tokenize(old_contents, context_window)
             after_tokens = ast_tokenize(new_contents, context_window)
 
-            # Compute 7-dim action vector
-            action = compute_action(old_contents, new_contents)
+            # Compute action vector
+            if rich_actions:
+                action = compute_rich_action(old_contents, new_contents)
+            else:
+                action = compute_action(old_contents, new_contents)
 
             before_list.append(before_tokens)
             after_list.append(after_tokens)
@@ -359,13 +368,14 @@ class CommitPackProcessor(BaseCollector):
         )
 
         # Write flat HDF5
+        actual_action_dim = ACTION_DIM_RICH if rich_actions else ACTION_DIM
         _write_flat_hdf5(
             output=output,
             before_list=before_list,
             after_list=after_list,
             action_list=action_list,
             context_window=context_window,
-            action_dim=ACTION_DIM,
+            action_dim=actual_action_dim,
             source_name=dataset_name,
         )
 
@@ -378,7 +388,7 @@ class CommitPackProcessor(BaseCollector):
                 "dataset": dataset_name,
                 "vocab_size": get_vocab_size(),
                 "context_window": context_window,
-                "action_dim": ACTION_DIM,
+                "action_dim": actual_action_dim,
                 "max_samples": max_samples,
                 "max_file_size": max_file_size,
                 "skipped_empty": skipped_empty,

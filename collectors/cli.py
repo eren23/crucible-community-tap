@@ -28,19 +28,21 @@ def collect_git(repo_path, output, max_commits, context_window):
 @click.option("--max-samples", default=None, type=int, help="Limit samples (None=all)")
 @click.option("--use-ft/--use-full", default=True, help="CommitPackFT (small, default) or full CommitPack")
 @click.option("--context-window", default=512, help="AST token sequence length")
-def process_commitpack(output, max_samples, use_ft, context_window):
+@click.option("--rich-actions", is_flag=True, help="Use 15-dim AST diff actions (default: 7-dim)")
+def process_commitpack(output, max_samples, use_ft, context_window, rich_actions):
     """Download and preprocess CommitPack Python data for code world model training."""
     from .commitpack_processor import CommitPackProcessor
 
     processor = CommitPackProcessor()
     stats = processor.collect(
-        Path("."),  # source ignored — data from HuggingFace
+        Path("."),
         Path(output),
         max_samples=max_samples,
         use_ft=use_ft,
         context_window=context_window,
+        rich_actions=rich_actions,
     )
-    click.echo(f"Processed {stats.num_transitions} transitions")
+    click.echo(f"Processed {stats.num_transitions} transitions ({stats.metadata['action_dim']}-dim actions)")
     click.echo(f"Written to {stats.output_path}")
 
 
