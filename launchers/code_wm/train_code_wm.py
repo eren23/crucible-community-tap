@@ -72,7 +72,8 @@ def main():
     print()
 
     # ---- Import tap modules ---------------------------------------------
-    tap_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # __file__ = tap/launchers/code_wm/train_code_wm.py → need 3 levels up
+    tap_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.path.insert(0, tap_root)
 
     from architectures.code_wm.code_wm import CodeWorldModel
