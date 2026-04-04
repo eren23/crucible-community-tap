@@ -181,6 +181,9 @@ class WorldModelBase(CrucibleModel):
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
         action_dim: int = 4,
+        lambda_dir: float = 0.5,
+        lambda_mag: float = 0.1,
+        lambda_cov: float = 0.01,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -192,6 +195,9 @@ class WorldModelBase(CrucibleModel):
         self.mlp_ratio = mlp_ratio
         self.dropout_rate = dropout
         self.action_dim = action_dim
+        self.lambda_dir = lambda_dir
+        self.lambda_mag = lambda_mag
+        self.lambda_cov = lambda_cov
 
     def _build_common(self, state_encoder: nn.Module, action_encoder: nn.Module) -> None:
         """Initialize shared components after subclass sets encoders.
@@ -374,37 +380,48 @@ class WorldModelBase(CrucibleModel):
 
         pred_embeddings = torch.stack(pred_list, dim=1)  # [B, T-1, D]
 
-        # Project predictions and targets through MLP heads (BYOL pattern).
-        # This prevents encoder collapse where before ≈ after.
+        # ─── Loss A: Prediction loss (projected + normalized) ───
         pred_flat = pred_embeddings.reshape(-1, self.model_dim)
         target_flat = z_target.reshape(-1, self.model_dim)
-        proj_pred = self.pred_projector(pred_flat)      # [B*(T-1), D]
-        proj_target = self.target_projector(target_flat) # [B*(T-1), D]
+        loss_pred = F.mse_loss(
+            F.normalize(self.pred_projector(pred_flat), dim=-1),
+            F.normalize(self.target_projector(target_flat), dim=-1),
+        )
 
-        # Prediction loss: MSE on projected embeddings (L2-normalized)
-        proj_pred_n = F.normalize(proj_pred, dim=-1)
-        proj_target_n = F.normalize(proj_target, dim=-1)
-        pred_loss = F.mse_loss(proj_pred_n, proj_target_n)
+        # ─── Delta-space losses (v2: transition geometry) ───
+        # The edit displacement field should be smooth, calibrated, and
+        # direction-aligned — this is the code-native geometry prior.
+        z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
+        delta_true = target_flat - z_current    # actual edit displacement
+        delta_pred = pred_flat - z_current      # predicted edit displacement
 
-        # Regularization: prevent embedding collapse.
-        # WM_REG_MODE selects the method (default: vicreg).
-        z_flat = z_all.reshape(-1, self.model_dim)  # [B*T, D]
-        reg_mode = os.environ.get("WM_REG_MODE", "vicreg")
+        # Loss B: Delta direction alignment
+        # "Predicted edit should point same direction as true edit"
+        dt_norm = delta_true.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        dp_norm = delta_pred.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        cos_sim = (delta_true / dt_norm * delta_pred / dp_norm).sum(dim=-1)
+        loss_dir = 1.0 - cos_sim.mean()
 
-        if reg_mode == "sigreg":
-            # SIGReg (LE-WM paper): Cramér-Wold + Epps-Pulley
-            reg_loss, z_std = self._compute_sigreg(z_flat)
-        else:
-            # VICReg: variance hinge + covariance decorrelation
-            z_std = z_flat.std(dim=0)
-            var_reg = F.relu(1.0 - z_std).mean()
-            z_centered = z_flat - z_flat.mean(dim=0)
-            cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
-            cov_loss = cov.fill_diagonal_(0).pow(2).sum() / self.model_dim
-            reg_loss = var_reg + 0.04 * cov_loss
+        # Loss C: Delta magnitude calibration
+        # "Predicted edit size should match actual edit size"
+        loss_mag = F.mse_loss(dp_norm.squeeze(-1), dt_norm.squeeze(-1))
 
-        # Total loss
-        loss = pred_loss + self.sigreg_weight * reg_loss
+        # Loss D: Light covariance penalty (just prevent dimension collapse)
+        z_flat = z_all.reshape(-1, self.model_dim)
+        z_std = z_flat.std(dim=0)
+        z_centered = z_flat - z_flat.mean(dim=0)
+        cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
+        loss_cov = cov.fill_diagonal_(0).pow(2).sum() / self.model_dim
+
+        # ─── Combined loss ───
+        loss = (loss_pred
+                + self.lambda_dir * loss_dir
+                + self.lambda_mag * loss_mag
+                + self.lambda_cov * loss_cov)
+
+        # Diagnostic: mean delta cosine sim and norm ratio
+        delta_cos_sim = cos_sim.mean()
+        delta_norm_ratio = (dp_norm / dt_norm).mean()
 
         # Update EMA target encoder
         if self.training:
@@ -412,8 +429,12 @@ class WorldModelBase(CrucibleModel):
 
         return {
             "loss": loss,
-            "pred_loss": pred_loss,
-            "reg_loss": reg_loss,
+            "loss_pred": loss_pred,
+            "loss_dir": loss_dir,
+            "loss_mag": loss_mag,
+            "loss_cov": loss_cov,
+            "delta_cos_sim": delta_cos_sim,
+            "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
             "target_embeddings": z_target,
             "z_std": z_std,
@@ -502,4 +523,7 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "mlp_ratio": float(_get("mlp_ratio", "WM_MLP_RATIO", "4.0")),
         "dropout": float(_get("dropout", "WM_DROPOUT", "0.1")),
         "action_dim": int(_get("action_dim", "ACTION_DIM", "4")),
+        "lambda_dir": float(_get("lambda_dir", "WM_LAMBDA_DIR", "0.5")),
+        "lambda_mag": float(_get("lambda_mag", "WM_LAMBDA_MAG", "0.1")),
+        "lambda_cov": float(_get("lambda_cov", "WM_LAMBDA_COV", "0.01")),
     }

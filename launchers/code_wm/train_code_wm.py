@@ -174,16 +174,24 @@ def main():
         scheduler.step()
 
         loss_val = out["loss"].item()
-        pred_loss = out["pred_loss"].item()
-        reg_loss = out.get("reg_loss", torch.tensor(0.0)).item()
+        loss_pred = out.get("loss_pred", out.get("pred_loss", torch.tensor(0.0))).item()
+        loss_dir = out.get("loss_dir", torch.tensor(0.0)).item()
+        loss_mag = out.get("loss_mag", torch.tensor(0.0)).item()
+        loss_cov = out.get("loss_cov", torch.tensor(0.0)).item()
+        delta_cos = out.get("delta_cos_sim", torch.tensor(0.0)).item()
+        delta_ratio = out.get("delta_norm_ratio", torch.tensor(0.0)).item()
 
         if loss_val < best_loss:
             best_loss = loss_val
 
         if use_wandb and step % 10 == 0:
             wandb.log({
-                "train/loss": loss_val, "train/pred_loss": pred_loss,
-                "train/reg_loss": reg_loss, "train/grad_norm": grad_norm,
+                "train/loss": loss_val, "train/loss_pred": loss_pred,
+                "train/loss_dir": loss_dir, "train/loss_mag": loss_mag,
+                "train/loss_cov": loss_cov,
+                "train/delta_cos_sim": delta_cos,
+                "train/delta_norm_ratio": delta_ratio,
+                "train/grad_norm": grad_norm,
                 "train/lr": optimizer.param_groups[0]["lr"],
             }, step=step)
 
@@ -192,7 +200,8 @@ def main():
             sps = (step + 1) / elapsed if elapsed > 0 else 0
             print(
                 f"step {step:5d}/{total_steps} | "
-                f"loss={loss_val:.4f} pred={pred_loss:.4f} reg_loss={reg_loss:.4f} | "
+                f"loss={loss_val:.4f} pred={loss_pred:.4f} dir={loss_dir:.4f} mag={loss_mag:.4f} | "
+                f"dcos={delta_cos:.3f} dratio={delta_ratio:.2f} | "
                 f"best={best_loss:.4f} | grad={grad_norm:.2f} | {sps:.1f} steps/s"
             )
 
