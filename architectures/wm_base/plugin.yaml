@@ -1,0 +1,6 @@
+name: wm_base
+type: architectures
+version: "0.1.0"
+description: "WorldModelBase — shared looped predictor backbone for domain-agnostic world models"
+author: eren23
+tags: [world-model, jepa, looped, backbone]

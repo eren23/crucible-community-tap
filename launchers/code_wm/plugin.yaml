@@ -1,0 +1,17 @@
+name: code_wm
+type: launchers
+version: "0.1.0"
+entry: train_code_wm.py
+description: Code World Model training launcher with W&B logging and GPU support
+author: eren23
+tags: [world-model, code-intelligence, jepa, training]
+parameters:
+  WM_MODEL_DIM: "Embedding dimension (default: 128)"
+  WM_NUM_LOOPS: "Looped predictor iterations (default: 6)"
+  WM_ENCODER_LOOPS: "Encoder loop count (default: 6)"
+  ACTION_DIM: "Action vector dim: 7 (basic) or 15 (rich AST diff)"
+  WM_LR: "Learning rate (default: 3e-4)"
+  WM_BATCH_SIZE: "Batch size (default: 128)"
+  WM_STEPS: "Training steps (default: 2000)"
+  WANDB_PROJECT: "W&B project (default: crucible-code-wm)"
+  WANDB_RUN_NAME: "W&B run name (auto-generated if empty)"

@@ -1,0 +1,86 @@
+name: code_wm
+description: Code World Model — AST-aware JEPA for code intelligence
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  gpu_count: 1
+  container_disk: 30
+  volume_disk: 0
+  interruptible: true
+
+python: "3.10"
+
+install:
+  - "h5py"
+  - "wandb"
+
+install_torch: "torch==2.6.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu124"
+
+# Data files to sync to pod (relative to tap root)
+data_files:
+  - "data/commitpackft_python_ast.h5"
+  - "data/commitpackft_python_ast_rich.h5"
+
+train: >-
+  WM_HDF5_PATH=data/commitpackft_python_ast.h5
+  WM_MODEL_DIM=${WM_MODEL_DIM:-128}
+  WM_NUM_LOOPS=${WM_NUM_LOOPS:-6}
+  WM_NUM_HEADS=${WM_NUM_HEADS:-4}
+  WM_ENCODER_LOOPS=${WM_ENCODER_LOOPS:-6}
+  ACTION_DIM=${ACTION_DIM:-7}
+  WM_LR=${WM_LR:-3e-4}
+  WM_BATCH_SIZE=${WM_BATCH_SIZE:-128}
+  WM_STEPS=${WM_STEPS:-2000}
+  WANDB_PROJECT=${WANDB_PROJECT:-crucible-code-wm}
+  WANDB_RUN_NAME=${WANDB_RUN_NAME:-code-wm-128d-7act}
+  python launchers/code_wm/train_code_wm.py
+
+env_defaults:
+  WM_MODEL_DIM: "128"
+  WM_NUM_LOOPS: "6"
+  WM_NUM_HEADS: "4"
+  WM_ENCODER_LOOPS: "6"
+  ACTION_DIM: "7"
+  WM_LR: "3e-4"
+  WM_BATCH_SIZE: "128"
+  WM_STEPS: "2000"
+  WANDB_PROJECT: "crucible-code-wm"
+
+# Experiment variants to run
+variants:
+  # Baseline: 7-dim actions, dim=128
+  baseline_7act:
+    WM_MODEL_DIM: "128"
+    ACTION_DIM: "7"
+    WM_HDF5_PATH: "data/commitpackft_python_ast.h5"
+    WANDB_RUN_NAME: "code-wm-128d-7act"
+
+  # Rich actions: 15-dim, dim=128
+  rich_15act:
+    WM_MODEL_DIM: "128"
+    ACTION_DIM: "15"
+    WM_HDF5_PATH: "data/commitpackft_python_ast_rich.h5"
+    WANDB_RUN_NAME: "code-wm-128d-15act"
+
+  # Larger: 7-dim actions, dim=256
+  large_7act:
+    WM_MODEL_DIM: "256"
+    WM_NUM_HEADS: "8"
+    WM_NUM_LOOPS: "8"
+    WM_ENCODER_LOOPS: "8"
+    ACTION_DIM: "7"
+    WM_HDF5_PATH: "data/commitpackft_python_ast.h5"
+    WANDB_RUN_NAME: "code-wm-256d-7act"
+    WM_STEPS: "5000"
+
+  # Larger + rich: 15-dim actions, dim=256
+  large_15act:
+    WM_MODEL_DIM: "256"
+    WM_NUM_HEADS: "8"
+    WM_NUM_LOOPS: "8"
+    WM_ENCODER_LOOPS: "8"
+    ACTION_DIM: "15"
+    WM_HDF5_PATH: "data/commitpackft_python_ast_rich.h5"
+    WANDB_RUN_NAME: "code-wm-256d-15act"
+    WM_STEPS: "5000"
