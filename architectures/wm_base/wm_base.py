@@ -386,14 +386,25 @@ class WorldModelBase(CrucibleModel):
         proj_target_n = F.normalize(proj_target, dim=-1)
         pred_loss = F.mse_loss(proj_pred_n, proj_target_n)
 
-        # SIGReg: enforce isotropic Gaussian embeddings (LE-WM paper).
-        # Strictly stronger than VICReg variance/covariance — controls full
-        # distribution shape via Cramér-Wold theorem + Epps-Pulley test.
+        # Regularization: prevent embedding collapse.
+        # WM_REG_MODE selects the method (default: vicreg).
         z_flat = z_all.reshape(-1, self.model_dim)  # [B*T, D]
-        sigreg_loss, z_std = self._compute_sigreg(z_flat)
+        reg_mode = os.environ.get("WM_REG_MODE", "vicreg")
+
+        if reg_mode == "sigreg":
+            # SIGReg (LE-WM paper): Cramér-Wold + Epps-Pulley
+            reg_loss, z_std = self._compute_sigreg(z_flat)
+        else:
+            # VICReg: variance hinge + covariance decorrelation
+            z_std = z_flat.std(dim=0)
+            var_reg = F.relu(1.0 - z_std).mean()
+            z_centered = z_flat - z_flat.mean(dim=0)
+            cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
+            cov_loss = cov.fill_diagonal_(0).pow(2).sum() / self.model_dim
+            reg_loss = var_reg + 0.04 * cov_loss
 
         # Total loss
-        loss = pred_loss + self.sigreg_weight * sigreg_loss
+        loss = pred_loss + self.sigreg_weight * reg_loss
 
         # Update EMA target encoder
         if self.training:
@@ -402,7 +413,7 @@ class WorldModelBase(CrucibleModel):
         return {
             "loss": loss,
             "pred_loss": pred_loss,
-            "sigreg": sigreg_loss,
+            "reg_loss": reg_loss,
             "pred_embeddings": pred_embeddings,
             "target_embeddings": z_target,
             "z_std": z_std,
