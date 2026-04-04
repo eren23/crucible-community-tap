@@ -52,6 +52,7 @@ def main():
     lr = float(os.environ.get("WM_LR", "3e-4"))
     batch_size = int(os.environ.get("WM_BATCH_SIZE", "128"))
     total_steps = int(os.environ.get("WM_STEPS", "2000"))
+    warmup_steps = int(os.environ.get("WM_WARMUP_STEPS", "200"))
     eval_interval = int(os.environ.get("WM_EVAL_INTERVAL", "100"))
     save_interval = int(os.environ.get("WM_SAVE_INTERVAL", "500"))
     output_dir = os.environ.get("OUTPUT_DIR", "./checkpoints")
@@ -131,7 +132,16 @@ def main():
 
     # ---- Optimizer + scheduler ------------------------------------------
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps)
+    # Linear warmup then cosine decay
+    warmup_sched = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_steps,
+    )
+    cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(total_steps - warmup_steps, 1),
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps],
+    )
 
     # ---- Batch loader ---------------------------------------------------
     def get_batch():
