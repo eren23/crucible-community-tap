@@ -41,7 +41,15 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from crucible.models.base import CrucibleModel
+try:
+    from crucible.models.base import CrucibleModel
+except ImportError:
+    # Standalone mode: minimal base matching CrucibleModel contract
+    class CrucibleModel(nn.Module):  # type: ignore[no-redef]
+        def training_step(self, **batch): return self.forward(**batch)
+        def validation_step(self, **batch): return self.forward(**batch)
+        @classmethod
+        def modality(cls): return "generic"
 
 
 # ---------------------------------------------------------------------------

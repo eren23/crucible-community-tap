@@ -48,7 +48,10 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from crucible.models.registry import register_model
+try:
+    from crucible.models.registry import register_model
+except ImportError:
+    register_model = None  # Standalone mode (no full Crucible install)
 
 # ---------------------------------------------------------------------------
 # Import shared components from wm_base (sibling plugin in the tap)
@@ -304,4 +307,5 @@ def _build_code_wm(args: Any) -> CodeWorldModel:
     return CodeWorldModel(**kwargs)
 
 
-register_model("code_wm", _build_code_wm, source="local")
+if register_model is not None:
+    register_model("code_wm", _build_code_wm, source="local")
