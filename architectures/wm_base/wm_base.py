@@ -181,6 +181,7 @@ class WorldModelBase(CrucibleModel):
         mlp_ratio: float = 4.0,
         dropout: float = 0.1,
         action_dim: int = 4,
+        lambda_pred: float = 1.0,
         lambda_dir: float = 0.5,
         lambda_mag: float = 0.1,
         lambda_cov: float = 0.01,
@@ -195,6 +196,7 @@ class WorldModelBase(CrucibleModel):
         self.mlp_ratio = mlp_ratio
         self.dropout_rate = dropout
         self.action_dim = action_dim
+        self.lambda_pred = lambda_pred
         self.lambda_dir = lambda_dir
         self.lambda_mag = lambda_mag
         self.lambda_cov = lambda_cov
@@ -380,13 +382,24 @@ class WorldModelBase(CrucibleModel):
 
         pred_embeddings = torch.stack(pred_list, dim=1)  # [B, T-1, D]
 
-        # ─── Loss A: Prediction loss (projected + normalized) ───
+        # ─── Loss A: Prediction loss ───
+        # WM_USE_PROJECTOR=0 disables projectors — MSE on raw normalized embeddings.
+        # With v2 delta losses providing direct geometric supervision, the projector
+        # may sabotage by absorbing alignment gradient.
         pred_flat = pred_embeddings.reshape(-1, self.model_dim)
         target_flat = z_target.reshape(-1, self.model_dim)
-        loss_pred = F.mse_loss(
-            F.normalize(self.pred_projector(pred_flat), dim=-1),
-            F.normalize(self.target_projector(target_flat), dim=-1),
-        )
+        use_projector = os.environ.get("WM_USE_PROJECTOR", "1") == "1"
+        if use_projector:
+            loss_pred = F.mse_loss(
+                F.normalize(self.pred_projector(pred_flat), dim=-1),
+                F.normalize(self.target_projector(target_flat), dim=-1),
+            )
+        else:
+            # Direct MSE on L2-normalized raw embeddings
+            loss_pred = F.mse_loss(
+                F.normalize(pred_flat, dim=-1),
+                F.normalize(target_flat, dim=-1),
+            )
 
         # ─── Delta-space losses (v2: transition geometry) ───
         # The edit displacement field should be smooth, calibrated, and
@@ -416,7 +429,7 @@ class WorldModelBase(CrucibleModel):
         loss_cov = cov.fill_diagonal_(0).pow(2).sum() / self.model_dim
 
         # ─── Combined loss ───
-        loss = (loss_pred
+        loss = (self.lambda_pred * loss_pred
                 + self.lambda_dir * loss_dir
                 + self.lambda_mag * loss_mag
                 + self.lambda_cov * loss_cov)
@@ -525,6 +538,7 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "mlp_ratio": float(_get("mlp_ratio", "WM_MLP_RATIO", "4.0")),
         "dropout": float(_get("dropout", "WM_DROPOUT", "0.1")),
         "action_dim": int(_get("action_dim", "ACTION_DIM", "4")),
+        "lambda_pred": float(_get("lambda_pred", "WM_LAMBDA_PRED", "1.0")),
         "lambda_dir": float(_get("lambda_dir", "WM_LAMBDA_DIR", "0.5")),
         "lambda_mag": float(_get("lambda_mag", "WM_LAMBDA_MAG", "0.1")),
         "lambda_cov": float(_get("lambda_cov", "WM_LAMBDA_COV", "0.01")),
