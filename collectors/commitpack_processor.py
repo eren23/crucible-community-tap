@@ -40,7 +40,7 @@ from typing import Any
 
 import numpy as np
 
-from .ast_tokenizer import ast_tokenize, get_vocab_size
+from .ast_tokenizer import ast_tokenize, ast_tokenize_dfs, get_vocab_size
 from .ast_diff import compute_rich_action, ACTION_DIM_RICH
 from .base import BaseCollector, CollectionStats
 
@@ -234,6 +234,7 @@ class CommitPackProcessor(BaseCollector):
         context_window: int = 512,
         max_file_size: int = 50_000,
         rich_actions: bool = False,
+        dfs_tokenizer: bool = False,
         **kwargs: Any,
     ) -> CollectionStats:
         """Download and preprocess CommitPack Python data.
@@ -333,8 +334,9 @@ class CommitPackProcessor(BaseCollector):
                 continue
 
             # AST-tokenize both versions
-            before_tokens = ast_tokenize(old_contents, context_window)
-            after_tokens = ast_tokenize(new_contents, context_window)
+            tokenizer_fn = ast_tokenize_dfs if dfs_tokenizer else ast_tokenize
+            before_tokens = tokenizer_fn(old_contents, context_window)
+            after_tokens = tokenizer_fn(new_contents, context_window)
 
             # Compute action vector
             if rich_actions:

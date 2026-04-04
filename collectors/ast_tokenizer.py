@@ -106,7 +106,12 @@ _OP_NAMES = [
 
 OP_MAP: dict[str, int] = {name: _OP_OFFSET + i for i, name in enumerate(_OP_NAMES)}
 
-VOCAB_SIZE = _OP_OFFSET + len(_OP_NAMES)  # ~663
+# DFS structure tokens (after operators)
+_STRUCT_OFFSET = _OP_OFFSET + len(_OP_NAMES)
+OPEN_BRACKET = _STRUCT_OFFSET        # Start of compound node children
+CLOSE_BRACKET = _STRUCT_OFFSET + 1   # End of compound node children
+
+VOCAB_SIZE = _STRUCT_OFFSET + 2  # ~665
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +216,100 @@ def ast_tokenize(source: str, max_len: int = 512) -> np.ndarray:
         if len(tokens) >= max_len - 1:
             break
 
+    tokens.append(EOS)
+
+    # Pad or truncate
+    if len(tokens) > max_len:
+        tokens = tokens[:max_len]
+    else:
+        tokens += [PAD] * (max_len - len(tokens))
+
+    return np.array(tokens, dtype=np.uint16)
+
+
+def ast_tokenize_dfs(source: str, max_len: int = 512) -> np.ndarray:
+    """Tokenize Python source via DFS pre-order traversal (preserves structure).
+
+    Unlike ``ast_tokenize`` (BFS), this uses depth-first traversal with
+    OPEN/CLOSE bracket tokens around compound nodes, producing a linearized
+    tree that preserves parent-child relationships.
+
+    Example: ``def foo(): return 1`` becomes::
+
+        BOS FunctionDef ident:foo OPEN Return Constant ident:int CLOSE EOS
+
+    The brackets let the transformer reconstruct tree structure — two functions
+    with different control flow produce DIFFERENT token sequences (unlike BFS
+    which yields the same bag of nodes).
+    """
+    if not source or not source.strip():
+        tokens = [BOS, EOS]
+        tokens += [PAD] * (max_len - len(tokens))
+        return np.array(tokens[:max_len], dtype=np.uint16)
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        tokens = [BOS, PARSE_ERROR, EOS]
+        tokens += [PAD] * (max_len - len(tokens))
+        return np.array(tokens[:max_len], dtype=np.uint16)
+
+    tokens: list[int] = [BOS]
+    _limit = max_len - 1  # reserve space for EOS
+
+    def _visit_dfs(node: ast.AST, depth: int) -> bool:
+        """DFS visit. Returns False if token budget exhausted."""
+        if len(tokens) >= _limit:
+            return False
+
+        node_name = type(node).__name__
+
+        # Node type token
+        nid = NODE_TYPE_MAP.get(node_name)
+        tokens.append(nid if nid is not None else UNK)
+
+        # Depth marker
+        tokens.append(_DEPTH_OFFSET + min(depth, MAX_DEPTH))
+
+        # Identifier / name tokens
+        if isinstance(node, ast.Name):
+            tokens.append(_ident_token(node.id))
+        elif isinstance(node, ast.Attribute):
+            tokens.append(_ident_token(node.attr))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            tokens.append(_ident_token(node.name))
+        elif isinstance(node, ast.ClassDef):
+            tokens.append(_ident_token(node.name))
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            tokens.append(_ident_token(node.module))
+
+        # Operator tokens
+        if isinstance(node, ast.BinOp):
+            tokens.append(OP_MAP.get(type(node.op).__name__, UNK))
+        elif isinstance(node, ast.UnaryOp):
+            tokens.append(OP_MAP.get(type(node.op).__name__, UNK))
+        elif isinstance(node, ast.BoolOp):
+            tokens.append(OP_MAP.get(type(node.op).__name__, UNK))
+        elif isinstance(node, ast.Compare) and node.ops:
+            tokens.append(OP_MAP.get(type(node.ops[0]).__name__, UNK))
+
+        # Constant type hint
+        if isinstance(node, ast.Constant):
+            tokens.append(_ident_token(f"__const_{type(node.value).__name__}__"))
+
+        # Recurse into children with OPEN/CLOSE brackets
+        children = list(ast.iter_child_nodes(node))
+        if children and len(tokens) < _limit:
+            tokens.append(OPEN_BRACKET)
+            for child in children:
+                if not _visit_dfs(child, depth + 1):
+                    break
+            if len(tokens) < _limit:
+                tokens.append(CLOSE_BRACKET)
+
+        return len(tokens) < _limit
+
+    _visit_dfs(tree, 0)
     tokens.append(EOS)
 
     # Pad or truncate
