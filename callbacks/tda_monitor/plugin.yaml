@@ -1,0 +1,6 @@
+name: tda_monitor
+type: callbacks
+version: "0.1.0"
+description: "Persistent homology monitor — tracks topological structure of latent representations during training"
+author: eren23
+tags: [tda, topology, world-model, monitoring]

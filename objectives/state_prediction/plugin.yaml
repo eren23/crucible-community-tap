@@ -1,0 +1,6 @@
+name: state_prediction
+type: objectives
+version: "0.1.0"
+description: "JEPA-style latent state prediction with variance regularization for world models"
+author: eren23
+tags: [world-model, jepa, state-prediction]

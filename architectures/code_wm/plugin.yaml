@@ -1,0 +1,6 @@
+name: code_wm
+type: architectures
+version: "0.1.0"
+description: "Code Intelligence World Model — predicts code state transitions using looped transformer encoder"
+author: eren23
+tags: [world-model, code-intelligence, looped, jepa]

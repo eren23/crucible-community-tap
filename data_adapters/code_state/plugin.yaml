@@ -1,0 +1,6 @@
+name: code_state
+type: data_adapters
+version: "0.1.0"
+description: "Code state data adapter — loads git edit or execution trace HDF5 for world model training"
+author: eren23
+tags: [world-model, code-intelligence, data-adapter]
