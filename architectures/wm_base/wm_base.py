@@ -268,21 +268,60 @@ class WorldModelBase(CrucibleModel):
                 p_online.data, alpha=1.0 - self.ema_decay
             )
 
-    def _compute_var_reg(self, z_flat: Tensor) -> tuple[Tensor, Tensor]:
-        """Inline variance regularization (SIGReg fallback).
+    def _compute_sigreg(self, z_flat: Tensor, num_proj: int = 128) -> tuple[Tensor, Tensor]:
+        """SIGReg: Sketched Isotropic Gaussian Regularizer (LE-WM paper).
 
-        Encourages per-dimension standard deviation >= 1.0 (VICReg-style hinge).
+        Enforces embeddings follow N(0, I) via the Cramér-Wold theorem:
+        if all 1D random projections are Gaussian, the full distribution is.
+        Uses the Epps-Pulley test statistic for each projection.
+
+        This is strictly stronger than VICReg variance/covariance reg — it
+        controls the FULL distribution shape, not just marginal moments.
 
         Args:
-            z_flat: [N, D] -- flattened encoder outputs across batch and time
+            z_flat: [N, D] -- flattened encoder outputs
+            num_proj: number of random projection directions M
 
         Returns:
-            (var_reg, z_std) where var_reg is the scalar loss and
-            z_std is [D] for downstream objective compatibility.
+            (sigreg_loss, z_std) where sigreg_loss is the scalar and
+            z_std is [D] for monitoring.
         """
-        z_std = z_flat.std(dim=0)  # [D]
-        var_reg = F.relu(1.0 - z_std).mean()
-        return var_reg, z_std
+        import math
+
+        N, D = z_flat.shape
+        z_std = z_flat.std(dim=0)  # [D] for monitoring
+
+        if N < 2:
+            return torch.tensor(0.0, device=z_flat.device), z_std
+
+        # Random unit-norm directions [M, D]
+        dirs = torch.randn(num_proj, D, device=z_flat.device)
+        dirs = dirs / dirs.norm(dim=1, keepdim=True).clamp_min(1e-8)
+
+        # Project embeddings: [M, N]
+        proj = dirs @ z_flat.t()
+
+        # Standardize each projection
+        mean = proj.mean(dim=1, keepdim=True)
+        std = proj.std(dim=1, keepdim=True).clamp_min(1e-8)
+        h = (proj - mean) / std  # [M, N]
+
+        # Epps-Pulley test: EP(h) = (2/n)Σ exp(-h²/2) - (1/n²)ΣΣ exp(-(hᵢ-hⱼ)²/4) - √2
+        term1 = (2.0 / N) * torch.exp(-0.5 * h.pow(2)).sum(dim=1)  # [M]
+
+        if N <= 512:
+            diff_sq = (h.unsqueeze(2) - h.unsqueeze(1)).pow(2)  # [M, N, N]
+            term2 = (1.0 / (N * N)) * torch.exp(-0.25 * diff_sq).sum(dim=(1, 2))
+        else:
+            # Random pair sampling for large batches
+            n_samp = min(N * 10, 2048)
+            idx_i = torch.randint(0, N, (num_proj, n_samp), device=h.device)
+            idx_j = torch.randint(0, N, (num_proj, n_samp), device=h.device)
+            diff_sq = (torch.gather(h, 1, idx_i) - torch.gather(h, 1, idx_j)).pow(2)
+            term2 = torch.exp(-0.25 * diff_sq).mean(dim=1)
+
+        ep = (term1 - term2 - math.sqrt(2.0)).abs().mean()
+        return ep, z_std
 
     def forward(
         self,
@@ -347,18 +386,14 @@ class WorldModelBase(CrucibleModel):
         proj_target_n = F.normalize(proj_target, dim=-1)
         pred_loss = F.mse_loss(proj_pred_n, proj_target_n)
 
-        # Variance regularization: prevent embedding collapse
+        # SIGReg: enforce isotropic Gaussian embeddings (LE-WM paper).
+        # Strictly stronger than VICReg variance/covariance — controls full
+        # distribution shape via Cramér-Wold theorem + Epps-Pulley test.
         z_flat = z_all.reshape(-1, self.model_dim)  # [B*T, D]
-        var_reg, z_std = self._compute_var_reg(z_flat)
-
-        # Covariance regularization (VICReg): decorrelate embedding dimensions
-        z_centered = z_flat - z_flat.mean(dim=0)
-        cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
-        # Off-diagonal elements should be zero
-        cov_loss = (cov.fill_diagonal_(0).pow(2).sum() / self.model_dim)
+        sigreg_loss, z_std = self._compute_sigreg(z_flat)
 
         # Total loss
-        loss = pred_loss + self.sigreg_weight * (var_reg + 0.04 * cov_loss)
+        loss = pred_loss + self.sigreg_weight * sigreg_loss
 
         # Update EMA target encoder
         if self.training:
@@ -367,8 +402,7 @@ class WorldModelBase(CrucibleModel):
         return {
             "loss": loss,
             "pred_loss": pred_loss,
-            "var_reg": var_reg,
-            "cov_loss": cov_loss,
+            "sigreg": sigreg_loss,
             "pred_embeddings": pred_embeddings,
             "target_embeddings": z_target,
             "z_std": z_std,

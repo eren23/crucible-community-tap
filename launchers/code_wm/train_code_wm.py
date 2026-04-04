@@ -175,8 +175,7 @@ def main():
 
         loss_val = out["loss"].item()
         pred_loss = out["pred_loss"].item()
-        var_reg = out["var_reg"].item()
-        cov_loss = out.get("cov_loss", torch.tensor(0.0)).item()
+        sigreg = out.get("sigreg", torch.tensor(0.0)).item()
 
         if loss_val < best_loss:
             best_loss = loss_val
@@ -184,8 +183,7 @@ def main():
         if use_wandb and step % 10 == 0:
             wandb.log({
                 "train/loss": loss_val, "train/pred_loss": pred_loss,
-                "train/var_reg": var_reg, "train/cov_loss": cov_loss,
-                "train/grad_norm": grad_norm,
+                "train/sigreg": sigreg, "train/grad_norm": grad_norm,
                 "train/lr": optimizer.param_groups[0]["lr"],
             }, step=step)
 
@@ -194,7 +192,7 @@ def main():
             sps = (step + 1) / elapsed if elapsed > 0 else 0
             print(
                 f"step {step:5d}/{total_steps} | "
-                f"loss={loss_val:.4f} pred={pred_loss:.4f} var={var_reg:.4f} | "
+                f"loss={loss_val:.4f} pred={pred_loss:.4f} sigreg={sigreg:.4f} | "
                 f"best={best_loss:.4f} | grad={grad_norm:.2f} | {sps:.1f} steps/s"
             )
 
