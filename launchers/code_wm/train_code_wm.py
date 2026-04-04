@@ -213,7 +213,8 @@ def main():
                 zt = eo["target_embeddings"].reshape(-1, model_dim)
                 cos_sim = F.cosine_similarity(zp, zt, dim=-1).mean().item()
                 if use_wandb:
-                    wandb.log({"val/cosine_sim": cos_sim, "val/pred_loss": eo["pred_loss"].item()}, step=step)
+                    val_pred = eo.get("loss_pred", eo.get("pred_loss", torch.tensor(0.0))).item()
+                    wandb.log({"val/cosine_sim": cos_sim, "val/pred_loss": val_pred}, step=step)
                 print(f"  val cosine_sim={cos_sim:.4f}")
             model.train()
 

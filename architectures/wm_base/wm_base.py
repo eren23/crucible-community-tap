@@ -402,9 +402,11 @@ class WorldModelBase(CrucibleModel):
         cos_sim = (delta_true / dt_norm * delta_pred / dp_norm).sum(dim=-1)
         loss_dir = 1.0 - cos_sim.mean()
 
-        # Loss C: Delta magnitude calibration
+        # Loss C: Delta magnitude calibration (log-space for numerical stability)
         # "Predicted edit size should match actual edit size"
-        loss_mag = F.mse_loss(dp_norm.squeeze(-1), dt_norm.squeeze(-1))
+        # log(ratio)^2 penalizes 2x-too-big same as 2x-too-small, scale-invariant
+        loss_mag = (torch.log(dp_norm.squeeze(-1) + 1e-6)
+                    - torch.log(dt_norm.squeeze(-1) + 1e-6)).pow(2).mean()
 
         # Loss D: Light covariance penalty (just prevent dimension collapse)
         z_flat = z_all.reshape(-1, self.model_dim)
