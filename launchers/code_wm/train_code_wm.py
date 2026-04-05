@@ -211,11 +211,34 @@ def main():
                 eo = model.forward(**eb)
                 zp = eo["pred_embeddings"].reshape(-1, model_dim)
                 zt = eo["target_embeddings"].reshape(-1, model_dim)
+                # z_current: need to recompute since it's not in outputs
+                # states: [B, 2, seq_len], actions: [B, 1, action_dim]
+                with torch.no_grad():
+                    z_curr = model.state_encoder(eb["states"][:, 0]).reshape(-1, model_dim)
+
+                # Raw cosine sim (inflated by before/after baseline)
                 cos_sim = F.cosine_similarity(zp, zt, dim=-1).mean().item()
+                # Copy-last baseline: how similar are current and target already?
+                cos_copy = F.cosine_similarity(z_curr, zt, dim=-1).mean().item()
+                # Honest signal: delta alignment (edit direction correctness)
+                delta_true = zt - z_curr
+                delta_pred = zp - z_curr
+                dt_n = F.normalize(delta_true, dim=-1)
+                dp_n = F.normalize(delta_pred, dim=-1)
+                delta_cos = (dt_n * dp_n).sum(dim=-1).mean().item()
+                # Lift over copy-last baseline
+                lift = cos_sim - cos_copy
+
                 if use_wandb:
                     val_pred = eo.get("loss_pred", eo.get("pred_loss", torch.tensor(0.0))).item()
-                    wandb.log({"val/cosine_sim": cos_sim, "val/pred_loss": val_pred}, step=step)
-                print(f"  val cosine_sim={cos_sim:.4f}")
+                    wandb.log({
+                        "val/cosine_sim": cos_sim,
+                        "val/cos_copy_baseline": cos_copy,
+                        "val/lift_over_copy": lift,
+                        "val/delta_cos_sim": delta_cos,
+                        "val/pred_loss": val_pred,
+                    }, step=step)
+                print(f"  val cos_sim={cos_sim:.4f} (copy={cos_copy:.4f}, lift={lift:+.4f}) | delta_cos={delta_cos:.4f}")
             model.train()
 
         if step > 0 and step % save_interval == 0:
