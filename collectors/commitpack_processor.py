@@ -90,9 +90,11 @@ def _detect_scope(old_source: str, new_source: str) -> int:
         2 -- module-level (imports, top-level statements, fallback)
     """
     try:
-        old_tree = ast_mod.parse(old_source) if old_source and old_source.strip() else ast_mod.parse("")
-        new_tree = ast_mod.parse(new_source) if new_source and new_source.strip() else ast_mod.parse("")
-    except SyntaxError:
+        old_clean = (old_source or "").replace("\x00", "")
+        new_clean = (new_source or "").replace("\x00", "")
+        old_tree = ast_mod.parse(old_clean) if old_clean.strip() else ast_mod.parse("")
+        new_tree = ast_mod.parse(new_clean) if new_clean.strip() else ast_mod.parse("")
+    except (SyntaxError, ValueError, RecursionError):
         return 2  # module-level fallback
 
     # Collect function and class names from both versions
@@ -269,16 +271,26 @@ class CommitPackProcessor(BaseCollector):
             dataset_name, max_samples,
         )
 
-        # CommitPack datasets store data as JSONL files at
-        # data/{language}/data.jsonl. Newer versions of the `datasets` library
-        # no longer support the custom loading scripts these repos ship.
-        # Load directly from the JSONL file via HuggingFace URLs.
+        # CommitPack datasets store data as JSONL files.
+        # CommitPackFT: single file at data/python/data.jsonl
+        # CommitPack (full): 458 sharded files at data/python/python-NNNN.jsonl
+        # Newer datasets library doesn't support their custom loading scripts,
+        # so we load JSONL files directly via HuggingFace URLs.
         ds = None
-        jsonl_url = f"hf://datasets/{dataset_name}/data/python/data.jsonl"
+        if use_ft:
+            jsonl_urls: Any = f"hf://datasets/{dataset_name}/data/python/data.jsonl"
+        else:
+            # Full CommitPack: 458 shards. Enumerate explicitly (globs don't
+            # expand reliably over hf:// URLs in the datasets library).
+            jsonl_urls = [
+                f"hf://datasets/{dataset_name}/data/python/python-{i:04d}.jsonl"
+                for i in range(1, 459)
+            ]
+
         strategies = [
             # Strategy 1: load JSONL directly (most reliable)
             lambda: load_dataset(
-                "json", data_files=jsonl_url, split="train", streaming=True,
+                "json", data_files=jsonl_urls, split="train", streaming=True,
             ),
             # Strategy 2: standard load (works with datasets < 4.5)
             lambda: load_dataset(
@@ -333,16 +345,18 @@ class CommitPackProcessor(BaseCollector):
                 skipped_size += 1
                 continue
 
-            # AST-tokenize both versions
-            tokenizer_fn = ast_tokenize_dfs if dfs_tokenizer else ast_tokenize
-            before_tokens = tokenizer_fn(old_contents, context_window)
-            after_tokens = tokenizer_fn(new_contents, context_window)
-
-            # Compute action vector
-            if rich_actions:
-                action = compute_rich_action(old_contents, new_contents)
-            else:
-                action = compute_action(old_contents, new_contents)
+            # AST-tokenize both versions (skip sample on any unexpected error)
+            try:
+                tokenizer_fn = ast_tokenize_dfs if dfs_tokenizer else ast_tokenize
+                before_tokens = tokenizer_fn(old_contents, context_window)
+                after_tokens = tokenizer_fn(new_contents, context_window)
+                if rich_actions:
+                    action = compute_rich_action(old_contents, new_contents)
+                else:
+                    action = compute_action(old_contents, new_contents)
+            except Exception as e:
+                logger.debug("Skipping sample due to error: %s", e)
+                continue
 
             before_list.append(before_tokens)
             after_list.append(after_tokens)

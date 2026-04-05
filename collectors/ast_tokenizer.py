@@ -155,8 +155,10 @@ def ast_tokenize(source: str, max_len: int = 512) -> np.ndarray:
         return np.array(tokens[:max_len], dtype=np.uint16)
 
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
+        # Strip null bytes that crash ast.parse (common in binary-ish files)
+        clean_source = source.replace("\x00", "")
+        tree = ast.parse(clean_source)
+    except (SyntaxError, ValueError, RecursionError):
         tokens = [BOS, PARSE_ERROR, EOS]
         tokens += [PAD] * (max_len - len(tokens))
         return np.array(tokens[:max_len], dtype=np.uint16)
@@ -248,8 +250,9 @@ def ast_tokenize_dfs(source: str, max_len: int = 512) -> np.ndarray:
         return np.array(tokens[:max_len], dtype=np.uint16)
 
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
+        clean_source = source.replace("\x00", "")
+        tree = ast.parse(clean_source)
+    except (SyntaxError, ValueError, RecursionError):
         tokens = [BOS, PARSE_ERROR, EOS]
         tokens += [PAD] * (max_len - len(tokens))
         return np.array(tokens[:max_len], dtype=np.uint16)

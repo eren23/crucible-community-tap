@@ -120,8 +120,8 @@ def _safe_parse(source: str) -> ast.AST | None:
     if not source:
         return None
     try:
-        return ast.parse(source)
-    except SyntaxError:
+        return ast.parse(source.replace("\x00", ""))
+    except (SyntaxError, ValueError, RecursionError):
         return None
 
 
