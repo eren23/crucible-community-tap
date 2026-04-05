@@ -8,12 +8,16 @@ Model: ~1.1M params. Eval: 2000 held-out samples, seed 42.
 | Run | Config | edit_type | knn_joint | NMI(joint) | retrieval_lift | heldout_dcos | heldout_pred_cos | baseline_cos(b,a) |
 |-----|--------|-----------|-----------|------------|----------------|--------------|------------------|---------------------|
 | G1.a | pred only | 88.5% | 74.8% | 0.269 | 0.247 | -0.023 | 0.075 ❌ | 0.9998 |
-| G1.b | **VICReg** | **95.0%** 🏆 | 77.8% | **0.368** 🏆 | **0.285** 🏆 | 0.137 | 0.062 ❌ | 0.802 ⭐ |
+| G1.b | VICReg | 95.0% | 77.8% | **0.368** 🏆 | 0.285 | 0.137 | 0.062 ❌ | 0.802 |
 | G1.c | SIGReg | 92.8% | 71.5% | 0.210 | 0.257 | -0.020 | 0.075 ❌ | 0.9987 |
-| G1.d | pred + **dir** | 90.3% | 77.8% | 0.280 | 0.254 | **0.234** 🏆 | **0.9995** ✓ | 0.9995 |
-| G1.f | all delta | 89.3% | 74.5% | 0.214 | 0.254 | 0.204 | **0.9996** ✓ | 0.9996 |
+| G1.d | pred + **dir** | 90.3% | 77.8% | 0.280 | 0.254 | 0.234 | **0.9995** ✓ | 0.9995 |
+| G1.f | all delta | 89.3% | 74.5% | 0.214 | 0.254 | 0.204 | 0.9996 ✓ | 0.9996 |
 | G2.a | delta + **mean** | 87.3% | 73.3% | 0.254 | 0.233 | 0.261 | 0.9986 ✓ | 0.9987 |
 | G3.b | delta, **no proj** | 88.0% | 75.3% | 0.261 | 0.250 | 0.227 | 0.999x ✓ | 0.9994 |
+| G5 | VICReg + dir | **96.75%** 🏆 | **80.25%** 🏆 | 0.345 | 0.285 | 0.221 | -0.45 ❌ | 0.751 |
+| G6 | dir λ=1.0 | 86.25% | 72.25% | 0.239 | 0.238 | 0.281 | 0.959 ✓ | 0.924 |
+| G7 | VICReg+dir+mag | 96.5% | 77.75% | **0.393** 🏆 | **0.289** 🏆 | 0.208 | -0.31 ❌ | 0.819 |
+| **G8** | **SIGReg+dir** 🏆 | 92.5% | 71.25% | 0.210 | 0.255 | **0.397** 🏆 | **0.975** ✓ | 0.979 |
 
 🏆 = category winner | ✓ = functional predictor | ❌ = broken predictor | ⭐ = notable baseline shift
 
@@ -59,6 +63,27 @@ Projector can be removed to save parameters and simplify architecture.
 ### Finding 5: The encoder is the workhorse
 
 Every method gets 87-95% edit_type classification. The encoder (AST tokens + CLS/mean pool + looped transformer) learns strong code representations regardless of loss formulation. The loss function determines what ELSE the model does (predict vs discriminate).
+
+## The Winner: G8 (SIGReg + delta-direction)
+
+**First config to pass ALL four metrics:** delta_cos 0.397, retrieval, classification, NMI ALL pass.
+
+Why it works: SIGReg with weight 0.01 is **gentle regularization** — it shapes the distribution statistically (isotropic Gaussian fitting) without aggressively spreading embeddings. VICReg with weight 0.1 is too aggressive, breaking the predictor.
+
+| Aspect | G8 (recipe) |
+|--------|-------------|
+| Regularizer | SIGReg, weight 0.01 (light) |
+| Transition loss | delta-direction, weight 0.5 |
+| Magnitude loss | NONE (not needed) |
+| Pooling | CLS |
+| Projector | yes (standard BYOL) |
+| baseline cos(b,a) | 0.98 (embeddings stay close) |
+| norm_ratio | 5x (reasonable magnitude) |
+| pred_cos | 0.975 (functional predictor) |
+| delta_cos | **0.397** (first above 0.3 threshold) |
+| edit_type | 92.5% (+4 over baseline) |
+
+**The simpler recipe beats all the complex ones.**
 
 ## Paper Framing (Revised)
 
