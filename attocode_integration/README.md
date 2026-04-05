@@ -25,10 +25,13 @@ attocode_integration/
 
 ### 1. Grab a Code WM checkpoint
 
-Any G8-style checkpoint works. Two sources:
+Any G8-style checkpoint works. Options:
 
-- Trained locally: `/tmp/synapse_codewm_package/g8_sigreg_dir.pt`
-- Retrained at 500K scale: see `launchers/code_wm/train_code_wm.py`
+- Train one via [`launchers/code_wm/train_code_wm.py`](../launchers/code_wm/train_code_wm.py)
+  with the G8 recipe (see [`findings/code_wm_transition_geometry/`](../findings/code_wm_transition_geometry/))
+- Use a pre-trained checkpoint from the project's model repo (if published)
+
+Set `CKPT=path/to/your_code_wm.pt` and use `$CKPT` in the commands below.
 
 ### 2. Index a repo's git history
 
@@ -37,7 +40,7 @@ cd crucible-community-tap
 
 WM_POOL_MODE=cls python attocode_integration/codewm_retrieval.py index \
     --repo /path/to/any/python/git/repo \
-    --checkpoint /tmp/synapse_codewm_package/g8_sigreg_dir.pt \
+    --checkpoint "$CKPT" \
     --out ./my_repo_idx \
     --max-commits 500 \
     --max-pairs 2000
@@ -53,7 +56,7 @@ encodes the delta, writes a compact index (deltas + metadata JSON).
 ```bash
 WM_POOL_MODE=cls python attocode_integration/codewm_retrieval.py query \
     --index ./my_repo_idx \
-    --checkpoint /tmp/synapse_codewm_package/g8_sigreg_dir.pt \
+    --checkpoint "$CKPT" \
     --before before.py --after after.py \
     --top-k 5
 ```
@@ -84,7 +87,7 @@ just textual matches. Including across test files the query never touched.
 ```bash
 WM_POOL_MODE=cls python attocode_integration/codewm_retrieval.py benchmark \
     --index ./my_repo_idx \
-    --checkpoint /tmp/synapse_codewm_package/g8_sigreg_dir.pt \
+    --checkpoint "$CKPT" \
     --num-queries 100
 ```
 

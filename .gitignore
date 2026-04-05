@@ -1,2 +1,12 @@
 data/*.h5
 /data/
+.claude/
+.env
+.env.*
+*.pt
+*.ckpt
+*.safetensors
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

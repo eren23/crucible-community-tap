@@ -1,95 +1,127 @@
 # Crucible Community Tap
 
-Community plugins and examples for the [Crucible ML research platform](https://github.com/eren23/parameter-golf_dev).
+Community plugins, tools, and research findings for the
+[Crucible ML research platform](https://github.com/eren23/parameter-golf_dev).
+
+## What's in this tap
+
+| | Count | What |
+|---|:---:|---|
+| [`architectures/`](architectures/) | 10 | Model architectures — LLM (5) + World Model (5) |
+| [`callbacks/`](callbacks/) | 12 | Compression (pruning/QAT), research (TDA, CEM) |
+| [`objectives/`](objectives/) | 3 | Custom training objectives |
+| [`data_adapters/`](data_adapters/) | 2 | Dataset adapters |
+| [`collectors/`](collectors/) | 1 | Git edit → AST token pipelines |
+| [`launchers/`](launchers/) | 4 | End-to-end training scripts |
+| [`evaluation/`](evaluation/) | — | Reusable eval tools |
+| [`findings/`](findings/) | 1 | Documented research findings |
+| [`attocode_integration/`](attocode_integration/) | — | Tools for Attocode + Synapse integration |
 
 ## Quick Start
 
 ```bash
 crucible tap add https://github.com/eren23/crucible-community-tap
-crucible tap search architecture
-crucible tap install moe
+crucible tap search world-model
+crucible tap install code_wm
 ```
 
-## Plugins
+---
 
-### Architectures
+## Architectures
 
-| Plugin | What it does | Type |
-|--------|-------------|------|
-| **`moe`** | Top-k routed Mixture of Experts replacing dense MLP. U-Net skips, load-balancing aux loss. | Python |
-| **`partial_rope`** | RoPE on first 16 dims per head only. Full augmentation stack (SmearGate + BigramHash + TrigramHash). | Python |
-| **`looped_aug`** | Weight-shared recurrence: 3 blocks x 12 steps + SmearGate + BigramHash. Parameter-efficient depth. | YAML spec |
-| **`fullstack`** | Kitchen sink: U-Net skips + gated residuals + 3x MLP + all augments. Competition-winning config. | YAML spec |
+### LLM (from Parameter Golf)
 
-### `moe` — Mixture of Experts
+| Plugin | What it does |
+|--------|-------------|
+| [`moe`](architectures/moe/) | Top-k routed Mixture of Experts. U-Net skips + load-balancing aux loss. |
+| [`partial_rope`](architectures/partial_rope/) | RoPE on first 16 dims per head only. Full SmearGate + BigramHash + TrigramHash stack. |
+| [`looped_aug`](architectures/looped_aug/) | Weight-shared recurrence: 3 blocks × 12 steps. Parameter-efficient depth. YAML spec. |
+| [`fullstack`](architectures/fullstack/) | Kitchen sink: U-Net + gated residuals + 3× MLP + all augments. YAML spec. |
+| [`sota_xsa`](architectures/sota_xsa/) | Cross-self attention variant from Parameter Golf top-5. |
 
-Replaces every dense MLP with a top-k routed MoE layer (default: 2 of 4 experts active per token). Same U-Net encoder-decoder skip structure as baseline. Forward pass adds load-balancing auxiliary loss to cross-entropy.
+### World Model (JEPA-style state + transition)
 
-```
-MODEL_FAMILY=moe  MOE_NUM_EXPERTS=4  MOE_TOP_K=2
-MODEL_DIM=512  NUM_LAYERS=9  ACTIVATION=relu_sq
-```
+| Plugin | What it does |
+|--------|-------------|
+| [`wm_base`](architectures/wm_base/) | Abstract JEPA base: shared predictor + delta-space losses (direction, magnitude, covariance). Used by all WM architectures below. |
+| [`code_wm`](architectures/code_wm/) | **Code World Model** — AST-tokenized Python editor. 1.1M params, 128d, 6-loop transformer. CLS/attention/mean pooling. |
+| [`lewm`](architectures/lewm/) | Latent Energy World Model (LE-WM). Slim variants for compact latent modeling. |
+| [`hybrid_lewm`](architectures/hybrid_lewm/) | Autoregressive-latent hybrid LE-WM. |
+| [`elastic_lewm`](architectures/elastic_lewm/) | Elastic-capacity LE-WM with dynamic width. |
 
-### `partial_rope` — Partial Rotary Embeddings
+---
 
-From top-5 Parameter Golf submissions. Applies RoPE to only the first `rope_dims` dimensions of each attention head — the rest learn position-independent features. Includes gated residuals, orthogonal init, and the full SmearGate + BigramHash + TrigramHash stack.
+## Callbacks
 
-```
-MODEL_FAMILY=partial_rope  ROPE_DIMS=16
-NUM_LAYERS=11  SMEAR_GATE=true  BIGRAM_HASH=true  TRIGRAM_HASH=true  ORTHO_INIT=true
-```
+**Compression** (ship-ready model shrinkage):
+`pruning_magnitude`, `pruning_attention_head`, `pruning_layer_removal`, `pruning_wanda`,
+`qat_int8`, `qat_int4`, `qat_mixed`, `compression_metrics`, `distillation`, `sensitivity_analysis`
 
-### `looped_aug` — Looped Transformer + Augmentations
+**Research:** `cem_eval` (cross-entropy method evaluation), `tda_monitor` (topological data analysis during training)
 
-3 unique transformer blocks applied 12 times with per-step scaling. Gets 12 layers of depth from 3 layers of parameters. Declarative YAML spec — zero Python.
+---
 
-```
-MODEL_FAMILY=looped_aug  RECURRENCE_STEPS=12  SHARE_BLOCKS=3
-SMEAR_GATE=true  BIGRAM_HASH=true  ORTHO_INIT=true
-```
+## Objectives
 
-### `fullstack` — Everything At Once
+- **`sigreg`** — Sketched Isotropic Gaussian Regularizer (Cramér-Wold + Epps-Pulley). Gentle state-space regularizer that pairs with delta-geometry losses.
+- **`state_prediction`** — JEPA state-prediction loss for world models.
+- **`distillation`** — Teacher-student KL with temperature.
 
-The competition kitchen sink. 11-layer U-Net with gated residuals, 3x MLP expansion, multiscale attention, SmearGate, BigramHash, TrigramHash, orthogonal init. Declarative YAML spec.
+---
 
-```
-MODEL_FAMILY=fullstack  NUM_LAYERS=11  MLP_MULT=3
-SMEAR_GATE=true  BIGRAM_HASH=true  TRIGRAM_HASH=true
-```
+## Data Adapters
+
+- **`code_state`** — HDF5-backed code state batches for world model training.
+- **`trajectory_hdf5`** — Trajectory data adapter for sequential models.
+
+---
+
+## Collectors
+
+- **`collectors/`** — Git history → AST-tokenized edit pairs pipeline. Includes:
+  - `ast_tokenizer.py` (662-vocab Python AST tokenizer)
+  - `ast_diff.py` (15-dim structural action vector)
+  - `commitpack_processor.py` (CommitPack / CommitPackFT streaming)
+  - `git_edit.py` (local git history harvester)
+
+---
+
+## Findings
+
+Documented research insights with evidence and reproducibility.
+
+| Finding | Claim |
+|---------|-------|
+| [`code_wm_transition_geometry`](findings/code_wm_transition_geometry/) | Code world models need both state geometry (SIGReg) and transition geometry (delta-direction) — the **G8 hybrid recipe** works. Includes 11-run ablation table + weight sweep. |
+
+See [`findings/README.md`](findings/README.md) for how to add your own.
+
+---
+
+## Tools
+
+### Evaluation
+
+- **`evaluation/semantic_eval.py`** — Downstream probes for code world models: edit retrieval, k-NN classification, cluster purity, held-out prediction.
+- **`evaluation/eval_code_wm.py`** — Standalone checkpoint evaluator.
+
+### Attocode Integration
+
+- **`attocode_integration/codewm_retrieval.py`** — Delta-NN edit retrieval CLI. Index a repo's git history, query with (before, after) hunks, get top-k historically similar edits with SHAs in ~30ms.
+- **`attocode_integration/export_onnx.py`** — Export trained Code WM to ONNX for Synapse deployment.
+- See [`attocode_integration/README.md`](attocode_integration/README.md) for benchmarks + usage.
 
 ---
 
 ## Examples
 
 ### YOLO Object Detection via MCP
+Fine-tuned YOLOv8n on COCO8 using Crucible's MCP tools — 8 tool calls, 7 minutes, ~$0.10.
+Full trace: [`examples/yolo/`](examples/yolo/)
 
-We fine-tuned YOLOv8n on COCO8 using Crucible's MCP tools — provision GPU, clone Ultralytics, train, collect metrics, tear down. 8 tool calls, 7 minutes, ~$0.10.
-
-```
-Results (10 epochs, RTX 4090):
-  precision:  0.679
-  recall:     0.750
-  mAP50:      0.772
-  mAP50-95:   0.606
-```
-
-Full trace with every MCP call and response: [`examples/yolo/`](examples/yolo/)
-
-**Run it yourself:**
-```bash
-# Copy project spec to your crucible project
-cp examples/yolo/yolo11-demo.yaml .crucible/projects/
-
-# Then via MCP:
-provision_project(project_name="yolo11-demo", count=1)
-fleet_refresh()
-bootstrap_project(project_name="yolo11-demo")
-run_project(project_name="yolo11-demo", overrides={"EPOCHS": "10"})
-collect_project_results(run_id="...")
-destroy_nodes()
-```
-
-Swap `yolov8n.pt` for `yolo11n.pt`, `yolo11s.pt`, etc. Swap `coco8.yaml` for `coco128.yaml` or `coco.yaml`.
+### Code World Model
+Train a 1.1M-param code editor with the G8 recipe:
+[`launchers/code_wm/train_code_wm.py`](launchers/code_wm/train_code_wm.py) + [`projects/code_wm.yaml`](projects/code_wm.yaml)
 
 ---
 
@@ -97,32 +129,25 @@ Swap `yolov8n.pt` for `yolo11n.pt`, `yolo11s.pt`, etc. Swap `coco8.yaml` for `co
 
 ```
 Install priority (highest wins):
-  1. Local:   .crucible/architectures/
-  2. Hub:     ~/.crucible-hub/plugins/architectures/   <-- tap installs here
-  3. Builtin: src/crucible/models/architectures/
+  1. Local:   .crucible/<type>/
+  2. Hub:     ~/.crucible-hub/plugins/<type>/   <-- tap installs here
+  3. Builtin: src/crucible/<type>/
 ```
 
-`crucible tap install moe` copies to `~/.crucible-hub/plugins/architectures/moe.py`. Auto-discovered on next import.
+`crucible tap install <name>` copies to `~/.crucible-hub/plugins/<type>/`. Auto-discovered on next import.
 
 ## MCP Integration
 
 ```python
-model_list_families()                        # see all (builtins + installed)
-model_fetch_architecture(family="moe")       # read source code
-model_get_spec(family="looped_aug")          # read YAML spec
-hub_search(query="rope")                     # search tap
-hub_install(name="partial_rope")             # install from MCP
+model_list_families()                        # all architectures (builtins + installed)
+model_fetch_architecture(family="code_wm")   # read source code
+hub_search(query="world-model")              # search tap
+hub_install(name="code_wm")                  # install from MCP
 ```
 
 ## Contributing
 
-1. Fork this repo
-2. Add `{type}/{name}/` with `{name}.py` + `plugin.yaml`
-3. PR
-
-**Plugin types:** architectures, optimizers, schedulers, callbacks, loggers, data_adapters, objectives, block_types, stack_patterns, augmentations, activations, providers
-
-**Names:** `[a-zA-Z0-9][a-zA-Z0-9_-]*` — underscores for multi-word.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for submission guidelines — plugins, findings, examples.
 
 ## License
 
