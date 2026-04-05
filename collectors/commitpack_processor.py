@@ -220,11 +220,52 @@ def _write_flat_hdf5(
 class CommitPackProcessor(BaseCollector):
     """Download and preprocess CommitPack Python data into flat HDF5.
 
-    Uses HuggingFace ``datasets`` with streaming to avoid downloading the
-    entire dataset upfront. Each sample yields a (before_tokens, action,
-    after_tokens) triple where tokens come from the Python AST tokenizer
-    and actions are 7-dim semantic edit descriptors.
+    For CommitPackFT: uses datasets library streaming (single file, small).
+    For full CommitPack: downloads 458 shards one-by-one via hf_hub_download
+    and iterates JSONL directly (predictable memory, no streaming weirdness).
     """
+
+    def _iter_commitpack_shards(
+        self,
+        dataset_name: str,
+        max_samples: int | None = None,
+        max_shards: int = 458,
+    ):
+        """Yield records from full CommitPack by downloading shards one-by-one.
+
+        Downloads each shard via hf_hub_download (cached locally), iterates
+        JSONL, yields records. Stops after max_samples if set.
+        """
+        import json
+        from huggingface_hub import hf_hub_download
+
+        yielded = 0
+        for shard_idx in range(1, max_shards + 1):
+            shard_name = f"data/python/python-{shard_idx:04d}.jsonl"
+            try:
+                local_path = hf_hub_download(
+                    repo_id=dataset_name,
+                    filename=shard_name,
+                    repo_type="dataset",
+                )
+            except Exception as exc:
+                logger.warning("Failed to download %s: %s", shard_name, exc)
+                continue
+
+            logger.info("Processing shard %d/%d: %s", shard_idx, max_shards, shard_name)
+            with open(local_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                        yield record
+                        yielded += 1
+                        if max_samples is not None and yielded >= max_samples:
+                            return
+                    except json.JSONDecodeError:
+                        continue
 
     def collect(
         self,
@@ -263,61 +304,57 @@ class CommitPackProcessor(BaseCollector):
             7-dim. Captures structural change details (added/removed/modified
             functions, imports, control flow, etc.). Default ``False``.
         """
-        from datasets import load_dataset
-
         dataset_name = "bigcode/commitpackft" if use_ft else "bigcode/commitpack"
         logger.info(
-            "Loading %s (python split, streaming), max_samples=%s",
+            "Loading %s (python split), max_samples=%s",
             dataset_name, max_samples,
         )
 
         # CommitPack datasets store data as JSONL files.
         # CommitPackFT: single file at data/python/data.jsonl
         # CommitPack (full): 458 sharded files at data/python/python-NNNN.jsonl
-        # Newer datasets library doesn't support their custom loading scripts,
-        # so we load JSONL files directly via HuggingFace URLs.
-        ds = None
-        if use_ft:
-            jsonl_urls: Any = f"hf://datasets/{dataset_name}/data/python/data.jsonl"
+        # We download shards directly via hf_hub_download (predictable, no
+        # datasets library streaming complexity) and iterate as JSONL.
+        if not use_ft:
+            # For full CommitPack: download shards one-by-one, yield records
+            ds = self._iter_commitpack_shards(
+                dataset_name, max_samples=max_samples,
+            )
         else:
-            # Full CommitPack: 458 shards. Enumerate explicitly (globs don't
-            # expand reliably over hf:// URLs in the datasets library).
-            jsonl_urls = [
-                f"hf://datasets/{dataset_name}/data/python/python-{i:04d}.jsonl"
-                for i in range(1, 459)
+            # For FT: use the datasets library
+            from datasets import load_dataset
+            ds = None
+            jsonl_url = f"hf://datasets/{dataset_name}/data/python/data.jsonl"
+            strategies = [
+                lambda: load_dataset(
+                    "json", data_files=jsonl_url, split="train", streaming=True,
+                ),
+                lambda: load_dataset(
+                    dataset_name, "python", split="train", streaming=True,
+                ),
             ]
 
-        strategies = [
-            # Strategy 1: load JSONL directly (most reliable)
-            lambda: load_dataset(
-                "json", data_files=jsonl_urls, split="train", streaming=True,
-            ),
-            # Strategy 2: standard load (works with datasets < 4.5)
-            lambda: load_dataset(
-                dataset_name, "python", split="train", streaming=True,
-            ),
-        ]
+        if use_ft:
+            # FT uses datasets library path
+            last_error = None
+            for i, strategy in enumerate(strategies):
+                try:
+                    ds = strategy()
+                    peek = next(iter(ds))
+                    assert "old_contents" in peek or "new_contents" in peek, \
+                        f"Unexpected schema: {list(peek.keys())}"
+                    logger.info("Loaded dataset via strategy %d", i + 1)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    logger.debug("Strategy %d failed: %s", i + 1, exc)
+                    ds = None
 
-        last_error = None
-        for i, strategy in enumerate(strategies):
-            try:
-                ds = strategy()
-                # Verify we can iterate and the schema is right
-                peek = next(iter(ds))
-                assert "old_contents" in peek or "new_contents" in peek, \
-                    f"Unexpected schema: {list(peek.keys())}"
-                logger.info("Loaded dataset via strategy %d", i + 1)
-                break
-            except Exception as exc:
-                last_error = exc
-                logger.debug("Strategy %d failed: %s", i + 1, exc)
-                ds = None
-
-        if ds is None:
-            logger.error("All loading strategies failed. Last error: %s", last_error)
-            raise RuntimeError(
-                f"Cannot load {dataset_name}. Last error: {last_error}"
-            )
+            if ds is None:
+                logger.error("All loading strategies failed. Last error: %s", last_error)
+                raise RuntimeError(
+                    f"Cannot load {dataset_name}. Last error: {last_error}"
+                )
 
         # Accumulate in lists, write all at once
         before_list: list[np.ndarray] = []
