@@ -428,11 +428,26 @@ class WorldModelBase(CrucibleModel):
         cov = (z_centered.T @ z_centered) / max(z_flat.shape[0] - 1, 1)
         loss_cov = cov.fill_diagonal_(0).pow(2).sum() / self.model_dim
 
+        # ─── Optional static regularizers (VICReg/SIGReg) for baseline comparison ───
+        # These run IN ADDITION to delta losses when enabled. For pure baselines,
+        # set WM_LAMBDA_DIR=0, WM_LAMBDA_MAG=0, WM_LAMBDA_COV=0.
+        reg_mode = os.environ.get("WM_REG_MODE", "none")
+        static_reg_loss = torch.tensor(0.0, device=z_all.device)
+        if reg_mode == "vicreg":
+            # VICReg: variance hinge (>=1 std per dim) + covariance decorrelation
+            var_hinge = F.relu(1.0 - z_std).mean()
+            # Reuse loss_cov above (off-diagonal squared). Combine.
+            static_reg_loss = var_hinge + 0.04 * loss_cov
+        elif reg_mode == "sigreg":
+            sig_loss, _ = self._compute_sigreg(z_flat)
+            static_reg_loss = sig_loss
+
         # ─── Combined loss ───
         loss = (self.lambda_pred * loss_pred
                 + self.lambda_dir * loss_dir
                 + self.lambda_mag * loss_mag
-                + self.lambda_cov * loss_cov)
+                + self.lambda_cov * loss_cov
+                + self.sigreg_weight * static_reg_loss)
 
         # Diagnostic: mean delta cosine sim and norm ratio
         delta_cos_sim = cos_sim.mean()
@@ -448,6 +463,7 @@ class WorldModelBase(CrucibleModel):
             "loss_dir": loss_dir,
             "loss_mag": loss_mag,
             "loss_cov": loss_cov,
+            "loss_static_reg": static_reg_loss,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
