@@ -13,17 +13,27 @@ python: "3.10"
 install:
   - "h5py"
   - "wandb"
+  # huggingface_hub is needed when WM_HDF5_PATH is a bare filename
+  # (the launcher falls back to hf_hub_download from eren23/codewm-data).
+  - "huggingface_hub"
 
 install_torch: "torch==2.6.0"
 install_flags: "--index-url https://download.pytorch.org/whl/cu124"
 
-# Data files to sync to pod (relative to tap root)
-data_files:
-  - "data/commitpackft_python_ast.h5"
-  - "data/commitpackft_python_ast_rich.h5"
+# Files SCP'd to the pod's workspace during bootstrap_project. The Crucible
+# fleet consumer is `local_files` (see src/crucible/core/config.py); the
+# older `data_files` spelling is now accepted as an alias but `local_files`
+# is the canonical name. Paths are expanduser'd, so ~/... works.
+#
+# NOTE: these paths are absolute (tap-root pinned) so this spec works
+# even when copied into .crucible/projects/ on any user machine. If you
+# want to use a different dataset, point at a file you have locally.
+local_files:
+  - "~/.crucible-hub/taps/crucible-community-tap/data/commitpackft_python_ast.h5"
+  - "~/.crucible-hub/taps/crucible-community-tap/data/commitpackft_python_ast_rich.h5"
 
 train: >-
-  WM_HDF5_PATH=data/commitpackft_python_ast.h5
+  WM_HDF5_PATH=${WM_HDF5_PATH:-commitpackft_python_ast.h5}
   WM_MODEL_DIM=${WM_MODEL_DIM:-128}
   WM_NUM_LOOPS=${WM_NUM_LOOPS:-6}
   WM_NUM_HEADS=${WM_NUM_HEADS:-4}
@@ -32,6 +42,12 @@ train: >-
   WM_LR=${WM_LR:-3e-4}
   WM_BATCH_SIZE=${WM_BATCH_SIZE:-128}
   WM_STEPS=${WM_STEPS:-2000}
+  WM_WINDOW_LEN=${WM_WINDOW_LEN:-4}
+  WM_EMA_DECAY=${WM_EMA_DECAY:-0.996}
+  WM_LAMBDA_CONTRAST=${WM_LAMBDA_CONTRAST:-0.0}
+  WM_CONTRAST_TEMPERATURE=${WM_CONTRAST_TEMPERATURE:-0.07}
+  WM_CONTRAST_POS_THRESHOLD=${WM_CONTRAST_POS_THRESHOLD:-0.9}
+  WM_SEED=${WM_SEED:-42}
   WANDB_PROJECT=${WANDB_PROJECT:-crucible-code-wm}
   WANDB_RUN_NAME=${WANDB_RUN_NAME:-code-wm-128d-7act}
   python launchers/code_wm/train_code_wm.py
@@ -46,6 +62,20 @@ env_defaults:
   WM_BATCH_SIZE: "128"
   WM_STEPS: "2000"
   WANDB_PROJECT: "crucible-code-wm"
+
+# Forward secrets from .env.runpod.local. WANDB_API_KEY is required for
+# wandb logging. Add your own entries here (e.g. HF_TOKEN is denylisted
+# by Crucible's write_remote_env — use local_files or a public dataset).
+env_forward:
+  - WANDB_API_KEY
+
+# Explicit wandb config — takes precedence over anything forwarded from
+# .env.runpod.local (write_remote_env merges env_set AFTER env_forward).
+# Users should add `WANDB_ENTITY` here via their .crucible/projects/
+# override if their wandb username differs from the tap default.
+env_set:
+  WANDB_PROJECT: "crucible-code-wm"
+  WANDB_MODE: "online"
 
 # Experiment variants to run
 variants:
