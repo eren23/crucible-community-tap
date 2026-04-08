@@ -84,3 +84,139 @@ variants:
     WM_HDF5_PATH: "data/commitpackft_python_ast_rich.h5"
     WANDB_RUN_NAME: "code-wm-256d-15act"
     WM_STEPS: "5000"
+
+  # ── Phase 5 (2026-04-08) — post-phase-4 extensions ──
+  # Reference: Spider Chat note "CodeWM — Final Phase 2-4 Report (2026-04-08)"
+  # All variants use trajectory data + ema-frozen fix (WM_EMA_DECAY=0.99999),
+  # dim=128, lr=1e-4, window=3 — matching the Phase 2b/3/4 config.
+  # HDF5 is a bare filename so the launcher's HF fallback downloads it from
+  # eren23/codewm-data/trajectories/... on pod boot (same as Phase 4 runs).
+
+  # Wave 1 — 4 pods in parallel
+  phase5_contrast_15k_high:
+    # The big one: 15K steps × λ=1.0 contrastive (long training + retrieval)
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "15000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_LAMBDA_CONTRAST: "1.0"
+    WM_CONTRAST_TEMPERATURE: "0.07"
+    WM_CONTRAST_POS_THRESHOLD: "0.9"
+    WM_SEED: "42"
+    WANDB_RUN_NAME: "phase5-contrast-15k-high"
+
+  phase5_contrast_extreme_3k:
+    # Finish phase 4 straggler: λ=2.0, full 3K steps
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "3000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_LAMBDA_CONTRAST: "2.0"
+    WM_CONTRAST_TEMPERATURE: "0.07"
+    WM_CONTRAST_POS_THRESHOLD: "0.9"
+    WM_SEED: "42"
+    WANDB_RUN_NAME: "phase5-contrast-extreme-3k"
+
+  phase5_contrast_mega_3k:
+    # Finish phase 4 straggler: λ=5.0, full 3K steps
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "3000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_LAMBDA_CONTRAST: "5.0"
+    WM_CONTRAST_TEMPERATURE: "0.07"
+    WM_CONTRAST_POS_THRESHOLD: "0.9"
+    WM_SEED: "42"
+    WANDB_RUN_NAME: "phase5-contrast-mega-3k"
+
+  phase5_ema_frozen_15k_seed2:
+    # Seed variance on predictor champion — seed 43 (phase 3 used 42)
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "15000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_SEED: "43"
+    WANDB_RUN_NAME: "phase5-ema-frozen-15k-seed2"
+
+  # Wave 2 — re-use pods 2/3/4 once wave 1 stragglers + seed2 finish
+  phase5_ema_frozen_15k_seed3:
+    # Seed variance on predictor champion — seed 44
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "15000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_SEED: "44"
+    WANDB_RUN_NAME: "phase5-ema-frozen-15k-seed3"
+
+  phase5_contrast_high_3k_seed2:
+    # Seed variance on retriever champion — seed 43 (phase 4 used 42)
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "3000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_LAMBDA_CONTRAST: "1.0"
+    WM_CONTRAST_TEMPERATURE: "0.07"
+    WM_CONTRAST_POS_THRESHOLD: "0.9"
+    WM_SEED: "43"
+    WANDB_RUN_NAME: "phase5-contrast-high-3k-seed2"
+
+  phase5_contrast_high_3k_seed3:
+    # Seed variance on retriever champion — seed 44
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "3000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "0.99999"
+    WM_LAMBDA_CONTRAST: "1.0"
+    WM_CONTRAST_TEMPERATURE: "0.07"
+    WM_CONTRAST_POS_THRESHOLD: "0.9"
+    WM_SEED: "44"
+    WANDB_RUN_NAME: "phase5-contrast-high-3k-seed3"
