@@ -12,6 +12,18 @@ Usage::
     python commit_chronicle_eval.py \\
         --checkpoint /workspace/parameter-golf/checkpoints/code_wm_best.pt \\
         --num-query 500 --num-gallery 1500
+
+Fix history (Phase 5C):
+    Previously marked "currently broken — diff reconstruction degenerate".
+    Two bugs fixed:
+      1. fetch_commit_chronicle_samples() tried `old_path`/`new_path` BEFORE
+         `old_content`/`new_content`. In CommitChronicle's schema, `*_path`
+         fields are file paths (strings), not source contents, so retrieval
+         was silently comparing filenames and looked degenerate.
+      2. reconstruct_before_after_from_diff() (renamed to
+         extract_hunks_from_diff) did not track hunk boundaries. Diff headers
+         and empty lines outside hunks leaked into the reconstructed
+         fragments. Hunk-tracking added + a final before==after reject.
 """
 from __future__ import annotations
 
@@ -66,33 +78,63 @@ def load_codewm(checkpoint_path: str, device: str = "cpu"):
     return model, cfg
 
 
-def reconstruct_before_after_from_diff(diff_text: str) -> tuple[str, str] | None:
-    """Reconstruct before/after code from a unified diff string.
+def extract_hunks_from_diff(diff_text: str) -> tuple[str, str] | None:
+    """Extract before/after FRAGMENTS from a unified diff string.
 
-    CommitChronicle stores diffs as unified-diff text. We parse the hunks and
-    apply them to reconstruct both versions.
+    NOTE: this does NOT reconstruct full files (which would require the
+    original source). It concatenates the ``-`` lines as the before fragment,
+    the ``+`` lines as the after fragment, and the context lines into both.
+    The result is suitable for fragment-level retrieval, not full-file
+    comparison. Hunk headers (``@@``) are used to bound hunk bodies so that
+    diff metadata / file headers / empty lines outside hunks don't leak into
+    the reconstructed fragments.
     """
     if not diff_text or not diff_text.strip():
         return None
-    before_lines = []
-    after_lines = []
+
+    before_lines: list[str] = []
+    after_lines: list[str] = []
+    in_hunk = False
+
     for line in diff_text.split("\n"):
+        # File headers bracket a diff section — they leave the current hunk
+        if line.startswith("diff --git"):
+            in_hunk = False
+            continue
         if line.startswith("---") or line.startswith("+++"):
+            in_hunk = False
             continue
+        # Hunk header starts a new hunk body
         if line.startswith("@@"):
+            in_hunk = True
             continue
+        # Skip "\ No newline at end of file" and similar markers
+        if line.startswith("\\"):
+            continue
+        # Ignore anything outside a hunk body (file metadata, blank separators)
+        if not in_hunk:
+            continue
+        # Inside a hunk body, classify the line
         if line.startswith("-"):
             before_lines.append(line[1:])
         elif line.startswith("+"):
             after_lines.append(line[1:])
-        elif line.startswith(" ") or line == "":
-            # Context line — include in both
-            before_lines.append(line[1:] if line.startswith(" ") else line)
-            after_lines.append(line[1:] if line.startswith(" ") else line)
+        elif line.startswith(" "):
+            # Context line — include in both reconstructions
+            before_lines.append(line[1:])
+            after_lines.append(line[1:])
+        elif line == "":
+            # Empty body line is typically a blank context line
+            before_lines.append("")
+            after_lines.append("")
 
     before = "\n".join(before_lines)
     after = "\n".join(after_lines)
+    # Fragments must actually differ — if they're identical, the hunk is
+    # whitespace-only and there's no learnable edit signal.
     if not before.strip() and not after.strip():
+        return None
+    if before == after:
         return None
     return before, after
 
@@ -126,6 +168,10 @@ def fetch_commit_chronicle_samples(num_samples: int, max_file_size: int = 50_000
             return []
 
     samples = []
+    # Log which fields the first record actually exposes — helps diagnose
+    # future schema drift without silent fallbacks.
+    first_logged = False
+
     for record in ds:
         if len(samples) >= num_samples:
             break
@@ -134,27 +180,53 @@ def fetch_commit_chronicle_samples(num_samples: int, max_file_size: int = 50_000
         for mod in mods:
             if len(samples) >= num_samples:
                 break
-            # Different schemas: try multiple field names
-            old_content = mod.get("old_path") or mod.get("old_content") or ""
-            new_content = mod.get("new_path") or mod.get("new_content") or ""
+            if not first_logged and isinstance(mod, dict):
+                print(f"  First mod fields: {sorted(mod.keys())}")
+                first_logged = True
+
+            # CRITICAL: prefer content fields over path fields. The previous
+            # version tried `old_path` first, which always succeeds with a
+            # file path string, so retrieval silently compared filenames.
+            old_content = (
+                mod.get("old_content")
+                or mod.get("old_contents")
+                or mod.get("before_content")
+                or mod.get("before")
+                or ""
+            )
+            new_content = (
+                mod.get("new_content")
+                or mod.get("new_contents")
+                or mod.get("after_content")
+                or mod.get("after")
+                or ""
+            )
             diff = mod.get("diff", "")
-            change_type = mod.get("change_type", "")
+            change_type = mod.get("change_type") or mod.get("type", "")
 
-            # If we have old_content and new_content directly, use them
-            if isinstance(old_content, str) and isinstance(new_content, str):
-                if old_content.strip() or new_content.strip():
-                    if len(old_content) > max_file_size or len(new_content) > max_file_size:
-                        continue
-                    samples.append({
-                        "old": old_content,
-                        "new": new_content,
-                        "change_type": change_type,
-                    })
+            if not isinstance(old_content, str):
+                old_content = ""
+            if not isinstance(new_content, str):
+                new_content = ""
+
+            # Prefer full-file content if the dataset exposes it
+            if old_content.strip() or new_content.strip():
+                if old_content == new_content:
+                    continue  # no-op change
+                if len(old_content) > max_file_size or len(new_content) > max_file_size:
                     continue
+                samples.append({
+                    "old": old_content,
+                    "new": new_content,
+                    "change_type": change_type,
+                })
+                continue
 
-            # Otherwise reconstruct from diff
+            # Fall back to hunk-fragment extraction from the unified diff.
+            # This gives fragment-level signal (NOT full-file) which is
+            # documented as such in extract_hunks_from_diff's docstring.
             if diff:
-                result = reconstruct_before_after_from_diff(diff)
+                result = extract_hunks_from_diff(diff)
                 if result is None:
                     continue
                 old, new = result
