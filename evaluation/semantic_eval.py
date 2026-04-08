@@ -121,7 +121,12 @@ def test_edit_retrieval(
     actions: np.ndarray,
     k: int = 10,
 ) -> dict:
-    """For each edit, find k-NN in delta space. Higher action similarity = good."""
+    """For each edit, find k-NN in delta space.
+
+    Metrics:
+      - Action similarity lift (original)
+      - MRR, Recall@1/5/10 (relevance = same edit_type)
+    """
     delta_n = F.normalize(delta_true, dim=-1)
     sim_matrix = delta_n @ delta_n.T
     sim_matrix.fill_diagonal_(-float("inf"))
@@ -139,10 +144,29 @@ def test_edit_retrieval(
     random_neighbor_actions = actions_n[random_idx]
     random_sim = (query_actions * random_neighbor_actions).sum(dim=-1).mean().item()
 
+    # Standard IR metrics (relevance = same edit_type)
+    edit_type = actions[:, :3].argmax(axis=1)
+    neighbor_types = edit_type[topk_idx.numpy()]
+    relevant = (neighbor_types == edit_type[:, None])
+
+    rr_list = []
+    for i in range(len(edit_type)):
+        hits = np.where(relevant[i])[0]
+        rr_list.append(1.0 / (hits[0] + 1) if len(hits) > 0 else 0.0)
+    mrr = float(np.mean(rr_list))
+
+    recall_at_1 = float(relevant[:, :1].any(axis=1).mean())
+    recall_at_5 = float(relevant[:, :5].any(axis=1).mean())
+    recall_at_10 = float(relevant[:, :10].any(axis=1).mean())
+
     return {
         "delta_nn_action_sim": mean_action_sim,
         "random_nn_action_sim": random_sim,
         "lift": mean_action_sim - random_sim,
+        "mrr": mrr,
+        "recall_at_1": recall_at_1,
+        "recall_at_5": recall_at_5,
+        "recall_at_10": recall_at_10,
     }
 
 
@@ -293,8 +317,8 @@ def main():
 
     print("\n=== Test 1: Edit retrieval (k-NN in delta space) ===")
     r1 = test_edit_retrieval(delta_true, actions_np, k=10)
-    for k, v in r1.items():
-        print(f"  {k}: {v:.4f}")
+    for key, v in r1.items():
+        print(f"  {key}: {v:.4f}")
 
     print("\n=== Test 2: k-NN edit classification ===")
     r2 = test_knn_classification(delta_true, actions_np, k=5)

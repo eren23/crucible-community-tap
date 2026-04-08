@@ -185,6 +185,11 @@ class WorldModelBase(CrucibleModel):
         lambda_dir: float = 0.5,
         lambda_mag: float = 0.1,
         lambda_cov: float = 0.01,
+        # ── Composition losses (opt-in, default disabled) ──
+        rollout_steps: int = 0,
+        lambda_rollout: float = 0.0,
+        rollout_loss_decay: float = 0.5,
+        lambda_path_consistency: float = 0.0,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -200,6 +205,10 @@ class WorldModelBase(CrucibleModel):
         self.lambda_dir = lambda_dir
         self.lambda_mag = lambda_mag
         self.lambda_cov = lambda_cov
+        self.rollout_steps = rollout_steps
+        self.lambda_rollout = lambda_rollout
+        self.rollout_loss_decay = rollout_loss_decay
+        self.lambda_path_consistency = lambda_path_consistency
 
     def _build_common(self, state_encoder: nn.Module, action_encoder: nn.Module) -> None:
         """Initialize shared components after subclass sets encoders.
@@ -442,7 +451,7 @@ class WorldModelBase(CrucibleModel):
             sig_loss, _ = self._compute_sigreg(z_flat)
             static_reg_loss = sig_loss
 
-        # ─── Combined loss ───
+        # ─── Combined loss (base) ───
         loss = (self.lambda_pred * loss_pred
                 + self.lambda_dir * loss_dir
                 + self.lambda_mag * loss_mag
@@ -452,6 +461,46 @@ class WorldModelBase(CrucibleModel):
         # Diagnostic: mean delta cosine sim and norm ratio
         delta_cos_sim = cos_sim.mean()
         delta_norm_ratio = (dp_norm / dt_norm).mean()
+
+        # ─── Composition losses (opt-in, only during training) ───
+        loss_rollout = torch.tensor(0.0, device=states.device)
+        loss_path_consistency = torch.tensor(0.0, device=states.device)
+
+        if self.training and num_transitions > 1:
+            # Multi-step rollout loss: roll out predictor autoregressively,
+            # penalize divergence from ground-truth targets at steps 2+.
+            if self.lambda_rollout > 0 and self.rollout_steps > 0:
+                max_steps = min(self.rollout_steps, num_transitions)
+                z_rolled = pred_list[0]  # step-1 prediction (already computed)
+                decay = self.rollout_loss_decay
+                rollout_total = torch.tensor(0.0, device=states.device)
+                for k in range(1, max_steps):
+                    z_rolled = self.predictor(z_rolled, z_action[:, k])
+                    step_loss = F.mse_loss(
+                        F.normalize(z_rolled, dim=-1),
+                        F.normalize(z_target[:, k], dim=-1),
+                    )
+                    rollout_total = rollout_total + (decay ** k) * step_loss
+                loss_rollout = rollout_total / max(max_steps - 1, 1)
+                loss = loss + self.lambda_rollout * loss_rollout
+
+            # Path consistency loss: for consecutive transition pairs (t, t+1),
+            # 2-step composition should reach the same place as ground truth.
+            # predict(predict(z_t, a_t), a_{t+1}) ≈ target_{t+1}
+            if self.lambda_path_consistency > 0:
+                pc_total = torch.tensor(0.0, device=states.device)
+                n_pairs = num_transitions - 1
+                for t in range(n_pairs):
+                    z_step1 = self.predictor(
+                        z_all[:, t].detach(), z_action[:, t],
+                    )
+                    z_step2 = self.predictor(z_step1, z_action[:, t + 1])
+                    pc_total = pc_total + F.mse_loss(
+                        F.normalize(z_step2, dim=-1),
+                        F.normalize(z_target[:, t + 1], dim=-1),
+                    )
+                loss_path_consistency = pc_total / max(n_pairs, 1)
+                loss = loss + self.lambda_path_consistency * loss_path_consistency
 
         # Update EMA target encoder
         if self.training:
@@ -464,6 +513,8 @@ class WorldModelBase(CrucibleModel):
             "loss_mag": loss_mag,
             "loss_cov": loss_cov,
             "loss_static_reg": static_reg_loss,
+            "loss_rollout": loss_rollout,
+            "loss_path_consistency": loss_path_consistency,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
@@ -558,4 +609,9 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "lambda_dir": float(_get("lambda_dir", "WM_LAMBDA_DIR", "0.5")),
         "lambda_mag": float(_get("lambda_mag", "WM_LAMBDA_MAG", "0.1")),
         "lambda_cov": float(_get("lambda_cov", "WM_LAMBDA_COV", "0.01")),
+        # Composition losses (opt-in)
+        "rollout_steps": int(_get("rollout_steps", "WM_ROLLOUT_STEPS", "0")),
+        "lambda_rollout": float(_get("lambda_rollout", "WM_LAMBDA_ROLLOUT", "0.0")),
+        "rollout_loss_decay": float(_get("rollout_loss_decay", "WM_ROLLOUT_LOSS_DECAY", "0.5")),
+        "lambda_path_consistency": float(_get("lambda_path_consistency", "WM_LAMBDA_PATH_CONSISTENCY", "0.0")),
     }
