@@ -190,6 +190,13 @@ class WorldModelBase(CrucibleModel):
         lambda_rollout: float = 0.0,
         rollout_loss_decay: float = 0.5,
         lambda_path_consistency: float = 0.0,
+        # ── Contrastive retrieval loss (Phase 4, opt-in) ──
+        # Pulls deltas with similar action vectors closer in latent space.
+        # Supervised contrastive (Khosla et al. 2020) with action cosine
+        # as the supervision signal.
+        lambda_contrast: float = 0.0,
+        contrast_temperature: float = 0.07,
+        contrast_pos_threshold: float = 0.9,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -209,6 +216,9 @@ class WorldModelBase(CrucibleModel):
         self.lambda_rollout = lambda_rollout
         self.rollout_loss_decay = rollout_loss_decay
         self.lambda_path_consistency = lambda_path_consistency
+        self.lambda_contrast = lambda_contrast
+        self.contrast_temperature = contrast_temperature
+        self.contrast_pos_threshold = contrast_pos_threshold
 
     def _build_common(self, state_encoder: nn.Module, action_encoder: nn.Module) -> None:
         """Initialize shared components after subclass sets encoders.
@@ -502,6 +512,77 @@ class WorldModelBase(CrucibleModel):
                 loss_path_consistency = pc_total / max(n_pairs, 1)
                 loss = loss + self.lambda_path_consistency * loss_path_consistency
 
+        # ─── Contrastive retrieval loss (Phase 4, opt-in) ───
+        # Supervised contrastive on the actual edit deltas, supervised by
+        # action vector cosine similarity. Pulls action-similar deltas
+        # together, pushes action-different deltas apart in latent space.
+        # This directly attacks the retrieval objective without changing
+        # the prediction objective.
+        #
+        # Stability notes (prevents NaN blowup at high lambda):
+        #   1. Normalize with explicit clamp_min on the delta norm (not
+        #      F.normalize's tiny default eps) so near-zero deltas don't
+        #      produce large-magnitude unit vectors.
+        #   2. Filter out rows with degenerate deltas (norm < eps) from the
+        #      contrastive loss entirely.
+        #   3. Check final loss is finite; skip this step if not.
+        loss_contrast = torch.tensor(0.0, device=states.device)
+        if self.training and self.lambda_contrast > 0:
+            # delta_true is [N, D] where N = B * num_transitions
+            delta_norm_vec = delta_true.norm(dim=-1, keepdim=True)
+            norm_eps = 1e-4
+            # Mask out degenerate rows (near-zero deltas)
+            nondegenerate = (delta_norm_vec.squeeze(-1) > norm_eps)
+            n_valid_rows = int(nondegenerate.sum().item())
+
+            if n_valid_rows >= 2:
+                # Select only non-degenerate rows
+                delta_keep = delta_true[nondegenerate]
+                actions_keep = actions.reshape(-1, actions.shape[-1])[nondegenerate]
+
+                # Normalize with a larger clamp to prevent gradient explosion
+                delta_n = delta_keep / delta_keep.norm(
+                    dim=-1, keepdim=True
+                ).clamp_min(norm_eps)
+                N = delta_n.shape[0]
+
+                # Pairwise delta cosine similarity (the latent representation)
+                # Clamp temperature to a reasonable floor
+                temp = max(float(self.contrast_temperature), 0.01)
+                delta_sim = (delta_n @ delta_n.T) / temp
+
+                # Supervision: pairwise action cosine
+                act_n = actions_keep / actions_keep.norm(
+                    dim=-1, keepdim=True
+                ).clamp_min(1e-6)
+                action_sim = act_n @ act_n.T  # [N, N]
+
+                # Positive pairs: high action cosine, exclude self
+                eye = torch.eye(N, device=delta_n.device, dtype=torch.bool)
+                pos_mask = (action_sim > self.contrast_pos_threshold) & ~eye
+
+                pos_count = pos_mask.float().sum(dim=-1)
+                valid_anchors = (pos_count > 0)
+
+                if valid_anchors.any():
+                    # Standard supervised contrastive loss (NT-Xent)
+                    delta_sim_masked = delta_sim.masked_fill(eye, -float("inf"))
+                    log_prob = F.log_softmax(delta_sim_masked, dim=-1)
+
+                    mean_log_prob_pos = (
+                        (pos_mask.float() * log_prob).sum(dim=-1)
+                        / pos_count.clamp_min(1)
+                    )
+                    loss_contrast = -(
+                        mean_log_prob_pos * valid_anchors.float()
+                    ).sum() / valid_anchors.float().sum().clamp_min(1)
+
+                    # Safety: only add to loss if finite
+                    if torch.isfinite(loss_contrast):
+                        loss = loss + self.lambda_contrast * loss_contrast
+                    else:
+                        loss_contrast = torch.tensor(0.0, device=states.device)
+
         # Update EMA target encoder
         if self.training:
             self._update_ema()
@@ -515,6 +596,7 @@ class WorldModelBase(CrucibleModel):
             "loss_static_reg": static_reg_loss,
             "loss_rollout": loss_rollout,
             "loss_path_consistency": loss_path_consistency,
+            "loss_contrast": loss_contrast,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
@@ -614,4 +696,8 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "lambda_rollout": float(_get("lambda_rollout", "WM_LAMBDA_ROLLOUT", "0.0")),
         "rollout_loss_decay": float(_get("rollout_loss_decay", "WM_ROLLOUT_LOSS_DECAY", "0.5")),
         "lambda_path_consistency": float(_get("lambda_path_consistency", "WM_LAMBDA_PATH_CONSISTENCY", "0.0")),
+        # Contrastive retrieval loss (Phase 4, opt-in)
+        "lambda_contrast": float(_get("lambda_contrast", "WM_LAMBDA_CONTRAST", "0.0")),
+        "contrast_temperature": float(_get("contrast_temperature", "WM_CONTRAST_TEMPERATURE", "0.07")),
+        "contrast_pos_threshold": float(_get("contrast_pos_threshold", "WM_CONTRAST_POS_THRESHOLD", "0.9")),
     }
