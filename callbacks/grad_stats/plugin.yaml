@@ -1,0 +1,15 @@
+name: grad_stats
+type: callbacks
+version: "0.1.0"
+description: >
+  Logs per-layer gradient norms every N steps. Useful for diagnosing dead
+  layers and exploding gradients. Zero overhead when not on a logging step.
+  Registered with priority 15 (after grad_clip, before nan_detector).
+author: eren23
+tags:
+  - callback
+  - gradient-diagnostics
+  - logging
+  - debugging
+config:
+  CALLBACKS: grad_stats

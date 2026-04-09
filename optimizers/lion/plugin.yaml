@@ -1,0 +1,15 @@
+name: lion
+type: optimizers
+version: "0.1.0"
+description: >
+  Lion optimizer — EvoLved Sign Momentum (Chen et al., 2023). Sign-based
+  update with decoupled weight decay. Memory-efficient alternative to Adam:
+  only stores momentum (no second moment), halving optimizer state memory.
+author: eren23
+tags:
+  - optimizer
+  - sign-momentum
+  - memory-efficient
+  - chen-2023
+config:
+  OPTIMIZER: lion

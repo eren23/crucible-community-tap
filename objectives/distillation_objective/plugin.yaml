@@ -1,0 +1,19 @@
+name: distillation_objective
+type: objectives
+version: "0.1.0"
+description: >
+  Knowledge distillation as a training objective (generic_backend flavor).
+  Loads a teacher state dict and computes the combined loss
+  `alpha * T^2 * KL(student || teacher) + (1 - alpha) * task_loss`.
+  Configurable loss types: kl, mse, cosine. Distinct from the callback-style
+  distillation plugin which injects KD via a forward hook on torch_backend.
+author: eren23
+tags:
+  - objective
+  - knowledge-distillation
+  - teacher-student
+  - kl
+  - mse
+  - cosine
+config:
+  OBJECTIVE: distillation

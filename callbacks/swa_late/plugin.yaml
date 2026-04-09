@@ -1,0 +1,16 @@
+name: swa_late
+type: callbacks
+version: "0.1.0"
+description: >
+  Late-stage Stochastic Weight Averaging. Averages model weights over the
+  final fraction of training (default: last 20%) for better generalization.
+  Activates at start_frac * total_steps and applies the running mean on
+  train_end.
+author: eren23
+tags:
+  - callback
+  - swa
+  - stochastic-weight-averaging
+  - generalization
+config:
+  CALLBACKS: swa_late
