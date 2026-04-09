@@ -44,7 +44,13 @@ def _set_nested_attr(obj: Any, dotted_path: str, value: Any) -> bool:
 
 
 def _resolve_run_identity(default_name: str) -> tuple[str, str]:
-    run_name = _env_str("LEWM_VARIANT", _env_str("WANDB_RUN_NAME", default_name))
+    # Crucible canonical env var: CRUCIBLE_VARIANT_NAME.
+    # LEWM_VARIANT is kept as a tap-local legacy alias for shells that still
+    # export it — prefer CRUCIBLE_VARIANT_NAME in new projects.
+    run_name = _env_str(
+        "CRUCIBLE_VARIANT_NAME",
+        _env_str("LEWM_VARIANT", _env_str("WANDB_RUN_NAME", default_name)),
+    )
     run_id = _env_str("CRUCIBLE_RUN_ID", _env_str("WANDB_RUN_NAME", run_name))
     return run_name, run_id
 
