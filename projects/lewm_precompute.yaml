@@ -1,0 +1,59 @@
+name: lewm_precompute
+repo: https://github.com/lucas-maes/le-wm.git
+branch: main
+shallow: true
+workspace: /workspace/le-wm
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  container_disk: 50
+  volume_disk: 250
+  interruptible: true
+
+python: "3.10"
+
+install:
+  - "stable-worldmodel[train,env]"
+  - "datasets>=2.0,<3.0"
+  - "huggingface_hub"
+  - "zstandard"
+
+install_torch: "torch==2.6.0 torchvision==0.21.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu124"
+
+launcher: lewm_upstream
+launcher_entry: precompute_pusht.py
+
+local_files:
+  - ".env.lewm"
+
+setup:
+  # 1. HF auth from the scp'd .env.lewm
+  - "if [ -f /workspace/le-wm/.env.lewm ]; then HF_TOKEN=$(grep -E '^HF_TOKEN=' /workspace/le-wm/.env.lewm | head -1 | cut -d= -f2); if [ -n \"$HF_TOKEN\" ]; then mkdir -p ~/.cache/huggingface && echo -n \"$HF_TOKEN\" > ~/.cache/huggingface/token && echo 'HF auth configured'; else echo 'WARNING: HF_TOKEN not found in .env.lewm'; fi; rm -f /workspace/le-wm/.env.lewm; fi"
+  # 2. Download HDF5 source data (use /workspace volume — container disk is too small)
+  - "export STABLEWM_HOME=/workspace/stable-wm-data && mkdir -p $STABLEWM_HOME && python3 -c \"import h5py,pathlib; p=pathlib.Path('/workspace/stable-wm-data/pusht_expert_train.h5'); ok=p.exists() and h5py.is_hdf5(p); (not ok and p.exists()) and p.unlink(); print('data exists' if ok else 'downloading'); raise SystemExit(0 if ok else 1)\" || python3 -c \"from huggingface_hub import hf_hub_url; import zstandard,os,pathlib,urllib.request; os.makedirs('/workspace/stable-wm-data',exist_ok=True); final=pathlib.Path('/workspace/stable-wm-data/pusht_expert_train.h5'); tmp=final.with_suffix('.h5.tmp'); url=hf_hub_url('quentinll/lewm-pusht','pusht_expert_train.h5.zst',repo_type='dataset'); r=urllib.request.urlopen(url); o=open(tmp,'wb'); zstandard.ZstdDecompressor().copy_stream(r,o); r.close(); o.close(); os.replace(tmp, final); print('downloaded')\""
+setup_timeout: 3600
+
+# Run precompute_pusht.py instead of the training launcher
+train: "STABLEWM_HOME=${STABLEWM_HOME:-/workspace/stable-wm-data} HF_PUSH_REPO=${HF_PUSH_REPO:-eren23/lewm-pusht-processed} HF_SAVE_DIR=${HF_SAVE_DIR:-/workspace/stable-wm-data/precomputed} MAX_SAMPLES=${MAX_SAMPLES:-0} python ${TRAIN_SCRIPT:-.crucible/launchers/lewm_upstream/precompute_pusht.py} data=pusht"
+timeout: 7200
+launch_timeout: 300
+
+env_forward:
+  - WANDB_API_KEY
+  - WANDB_ENTITY
+  - HF_PUSH_REPO
+  - HF_SAVE_DIR
+  - MAX_SAMPLES
+
+env_set:
+  STABLEWM_HOME: /workspace/stable-wm-data
+  HF_SAVE_DIR: /workspace/stable-wm-data/precomputed
+  HF_PUSH_REPO: "eren23/lewm-pusht-processed"
+  MAX_SAMPLES: ""
+  WANDB_MODE: disabled
+
+metrics:
+  source: stdout
+  primary: precompute
+  direction: minimize

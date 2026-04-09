@@ -1,6 +1,9 @@
 name: code_wm
 description: Code World Model — AST-aware JEPA for code intelligence
 
+repo: "https://github.com/eren23/crucible-community-tap"
+branch: main
+
 pod:
   gpu_type: "NVIDIA GeForce RTX 4090"
   gpu_count: 1
@@ -13,27 +16,27 @@ python: "3.10"
 install:
   - "h5py"
   - "wandb"
-  # huggingface_hub is needed when WM_HDF5_PATH is a bare filename
-  # (the launcher falls back to hf_hub_download from eren23/codewm-data).
   - "huggingface_hub"
 
 install_torch: "torch==2.6.0"
 install_flags: "--index-url https://download.pytorch.org/whl/cu124"
 
-# Files SCP'd to the pod's workspace during bootstrap_project. The Crucible
-# fleet consumer is `local_files` (see src/crucible/core/config.py); the
-# older `data_files` spelling is now accepted as an alias but `local_files`
-# is the canonical name. Paths are expanduser'd, so ~/... works.
-#
-# NOTE: these paths are absolute (tap-root pinned) so this spec works
-# even when copied into .crucible/projects/ on any user machine. If you
-# want to use a different dataset, point at a file you have locally.
+# Data files to sync to pod (relative to tap root)
+# NOTE: `data_files` is a tap-level field NOT consumed by Crucible fleet
+# bootstrap_project — it only looks at `local_files` (scp'd to {workspace}/{basename}).
+data_files:
+  - "data/commitpackft_python_ast.h5"
+  - "data/commitpackft_python_ast_rich.h5"
+  - "data/commitpack_python_trajectories_1.5m.h5"
+
+# Local files SCP'd to pod workspace during bootstrap_project.
+# Files land at /workspace/project/{basename} (directory path is stripped).
+# Phase 5: only trajectory file needed (the HF dataset is private / path unknown).
 local_files:
-  - "~/.crucible-hub/taps/crucible-community-tap/data/commitpackft_python_ast.h5"
-  - "~/.crucible-hub/taps/crucible-community-tap/data/commitpackft_python_ast_rich.h5"
+  - "~/.crucible-hub/taps/crucible-community-tap/data/commitpack_python_trajectories_1.5m.h5"
 
 train: >-
-  WM_HDF5_PATH=${WM_HDF5_PATH:-commitpackft_python_ast.h5}
+  WM_HDF5_PATH=${WM_HDF5_PATH:-data/commitpackft_python_ast.h5}
   WM_MODEL_DIM=${WM_MODEL_DIM:-128}
   WM_NUM_LOOPS=${WM_NUM_LOOPS:-6}
   WM_NUM_HEADS=${WM_NUM_HEADS:-4}
@@ -64,17 +67,17 @@ env_defaults:
   WANDB_PROJECT: "crucible-code-wm"
 
 # Forward secrets from .env.runpod.local. WANDB_API_KEY is required for
-# wandb logging. Add your own entries here (e.g. HF_TOKEN is denylisted
-# by Crucible's write_remote_env — use local_files or a public dataset).
+# wandb logging. HF_TOKEN is on the denylist (and not needed since the
+# trajectory H5 is shipped via local_files SCP).
 env_forward:
   - WANDB_API_KEY
 
-# Explicit wandb config — takes precedence over anything forwarded from
-# .env.runpod.local (write_remote_env merges env_set AFTER env_forward).
-# Users should add `WANDB_ENTITY` here via their .crucible/projects/
-# override if their wandb username differs from the tap default.
+# Explicit wandb config — takes precedence over .env.runpod.local (which still
+# has WANDB_PROJECT=parameter-golf from the native lewm flow). write_remote_env
+# merges env_set AFTER env_forward, so these win over .env.runpod.local.
 env_set:
   WANDB_PROJECT: "crucible-code-wm"
+  WANDB_ENTITY: "eren23"
   WANDB_MODE: "online"
 
 # Experiment variants to run

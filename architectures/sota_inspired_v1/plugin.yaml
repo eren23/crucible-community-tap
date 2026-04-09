@@ -1,0 +1,21 @@
+name: sota_inspired_v1
+type: architectures
+version: "0.1.0"
+description: >
+  Declarative SOTA-inspired architecture composed from attention_block with
+  encoder_decoder_skip pattern, gated residuals, multiscale windows, and the
+  full SmearGate + BigramHash + TrigramHash augmentation stack. Mid-point
+  between the baseline looped architectures and sota_xsa — useful as a
+  reference for how to stack augmentations on a standard attention block.
+author: eren23
+tags:
+  - architecture
+  - declarative
+  - yaml-spec
+  - encoder-decoder-skip
+  - augmentations
+  - smear-gate
+  - bigram-hash
+  - trigram-hash
+config:
+  MODEL_FAMILY: sota_inspired_v1
