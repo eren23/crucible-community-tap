@@ -6,13 +6,21 @@ step k-1 and step k, and true_delta_k is the ground-truth target-encoder
 displacement.  The right nulls for this metric are delta-space nulls, not
 state-space ones.
 
-We compute three:
+We compute four:
 
     trivial_identity     : zero-delta predictor (always 0 by convention)
     shuffled_action      : cos(true_delta_i, true_delta_{perm(i)})
                            for a random permutation within a batch
     random_trajectory    : cos(true_delta_i, true_delta_j) for i,j drawn
                            from different trajectories
+    mean_delta           : cos(true_delta_i, mean(true_delta)) -- constant
+                           predictor that always outputs the mean training
+                           delta.  Tests whether the delta distribution is
+                           low-rank enough that a mean-direction predictor
+                           looks good by itself.
+
+Plus one more delta-space null (self-consistency, cos(d01, d12)) that is
+already in the script.
 
 We also report the state-space measurements that explain WHY delta cosine
 is the metric of choice.
@@ -150,6 +158,13 @@ random_traj_null_d02 = cos_rows(d02, d02[perm2])
 # work?"
 self_consistency_d01_d12 = cos_rows(d01, d12)
 
+# Null 4: mean-delta (constant predictor).
+# What if you always predict the mean true delta?  Tests whether the
+# delta distribution is low-rank enough that a constant mean-direction
+# predictor scores high on its own.
+mean_d01 = d01.mean(dim=0, keepdim=True)                # [1, D]
+mean_delta_null = cos_rows(d01, mean_d01.expand_as(d01))
+
 
 def summarise(name, t):
     t = t.float().cpu().numpy()
@@ -167,6 +182,7 @@ print('\n=== DELTA-SPACE NULL MODELS (the right comparison for s1/s2/s3) ===')
 summarise('trivial identity (always 0)', torch.zeros(1))
 summarise('shuffled_null  cos(d01, d01[perm])', shuffled_null_d01)
 summarise('random_traj_null  cos(d02, d02[perm])', random_traj_null_d02)
+summarise('mean_delta_null  cos(d01, mean_d01)', mean_delta_null)
 summarise('self_consistency  cos(d01, d12)',     self_consistency_d01_d12)
 
 print('\nPaper headline to interpret:')
@@ -174,4 +190,5 @@ print('  predictor s1 (delta_cos_sim) at 15K champion ~ 0.987 - 0.991')
 print('  trivial-identity null = 0.000')
 print(f'  shuffled-action null (mean) = {shuffled_null_d01.float().mean():.4f}')
 print(f'  random-trajectory null (mean) = {random_traj_null_d02.float().mean():.4f}')
+print(f'  mean-delta (constant) null = {mean_delta_null.float().mean():.4f}')
 print(f'  within-trajectory self-consistency null = {self_consistency_d01_d12.float().mean():.4f}')
