@@ -22,18 +22,77 @@ crucible-community-tap/
 ## Adding a plugin
 
 1. Pick the right subdirectory (`architectures/`, `callbacks/`, etc.)
-2. Create a `plugin.yaml` manifest:
-   ```yaml
-   name: my_plugin
-   type: architectures  # or callbacks, collectors, etc.
-   version: 0.1.0
-   description: One-line description
-   author: your_handle
-   tags: [world_model, code, etc.]
-   ```
+2. Create a `plugin.yaml` manifest following the schema below
 3. Add your Python module(s) alongside `plugin.yaml`
 4. Optional: add a `README.md` with usage details
-5. Run `crucible tap push <tap-name>` and open a PR
+5. Run `crucible tap validate .` locally — it walks every plugin.yaml
+   and reports errors/warnings. Fix errors before committing.
+6. Run `crucible tap push <tap-name>` and open a PR
+
+### plugin.yaml schema
+
+The full schema is defined in `crucible.core.plugin_schema` and
+enforced by `crucible tap validate`. Required fields:
+
+```yaml
+name: my_plugin                # [a-zA-Z_][a-zA-Z0-9_-]*, unique
+type: architectures            # see KNOWN_PLUGIN_TYPES
+version: "0.1.0"               # semver-ish (M.m.p, -suffix ok)
+description: One-line what-it-does
+```
+
+Strongly recommended (missing = warning, not error):
+
+```yaml
+author: your_handle
+tags: [world-model, jepa, lewm]
+crucible_compat: ">=0.2,<0.3"  # version range against crucible-ml
+dependencies:                  # Python deps your plugin needs
+  - "torch>=2.0"
+  - "einops>=0.7"
+  - {name: "h5py", version: ">=3"}   # dict form also accepted
+```
+
+Free-form (not validated, documentation only):
+
+```yaml
+config:                        # default env vars the plugin sets
+  MODEL_FAMILY: looped_augmented
+parameters:                    # runtime knobs your plugin reads
+  RECURRENCE_STEPS: "Number of logical recurrence steps (default: 12)"
+```
+
+### Validating your plugin
+
+Before committing:
+
+```bash
+# Validate one plugin (fastest iteration)
+python3 -c "
+from crucible.core.plugin_schema import validate_manifest_file
+from pathlib import Path
+r = validate_manifest_file(Path('my_category/my_plugin/plugin.yaml'))
+for i in r.issues:
+    print(f'[{i.severity.upper()}] {i.field}: {i.message}')
+print('OK' if r.ok else 'FAIL')
+"
+
+# Validate the whole tap
+crucible tap validate .
+
+# Fail on warnings too (CI-strict mode)
+crucible tap validate . --warnings-as-errors
+```
+
+### Versioning policy
+
+- Every plugin starts at `0.1.0`.
+- Bump the **patch** (`0.1.0` → `0.1.1`) for bug fixes or doc-only changes.
+- Bump the **minor** (`0.1.0` → `0.2.0`) when adding new features that
+  don't break existing configs.
+- Bump the **major** (`0.1.0` → `1.0.0`) on breaking changes to env
+  vars, config keys, or module API.
+- Add a `CHANGELOG.md` next to `plugin.yaml` for non-trivial updates.
 
 ## Adding a finding
 
