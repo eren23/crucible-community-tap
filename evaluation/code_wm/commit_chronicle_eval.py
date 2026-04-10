@@ -40,11 +40,24 @@ import torch
 import torch.nn.functional as F
 
 
-def _load_code_wm_modules():
-    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
+def _resolve_tap_root() -> Path:
     tap_root = Path(__file__).parent.parent.parent
     if not (tap_root / "architectures" / "wm_base" / "wm_base.py").exists():
         tap_root = Path("/workspace/crucible-community-tap")
+    return tap_root
+
+
+# Make `from collectors...` importable regardless of cwd / pod layout. The
+# three `sys.path.insert(0, "/workspace/crucible-community-tap")` inside
+# compute_actions/encode_codewm/bow_encode were written for the RunPod layout;
+# when running locally from the tap clone the tap root is not at /workspace.
+_TAP_ROOT = _resolve_tap_root()
+if str(_TAP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_TAP_ROOT))
+
+
+def _load_code_wm_modules():
+    tap_root = _TAP_ROOT
     for mod_name, mod_path in [
         ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
         ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),
@@ -144,17 +157,32 @@ def extract_hunks_from_diff(diff_text: str) -> tuple[str, str] | None:
     return before, after
 
 
-def fetch_commit_chronicle_samples(num_samples: int, max_file_size: int = 50_000):
-    """Fetch samples from JetBrains-Research/commit-chronicle subset_llm."""
+def fetch_commit_chronicle_samples(
+    num_samples: int,
+    max_file_size: int = 50_000,
+    config: str = "subset_llm",
+    language: str | None = None,
+):
+    """Fetch samples from JetBrains-Research/commit-chronicle.
+
+    Args:
+        num_samples: Stop iterating once this many usable samples have been built.
+        max_file_size: Skip file-edits whose before/after content exceeds this many chars.
+        config: Dataset config — ``subset_llm`` (4 k commits, curated for LLM evals),
+            ``subset_cmg`` (204 k commits, curated for commit-message generation),
+            or ``default`` (full dataset with train/validation/test splits).
+        language: If set, only keep commits whose ``language`` field matches (case-insensitive).
+            ``subset_cmg`` and ``default`` cover many languages; set this to ``Python`` to
+            match the CodeWM training distribution.
+    """
     from datasets import load_dataset
 
-    print("Loading commit-chronicle subset_llm...")
+    print(f"Loading commit-chronicle {config}" + (f" (language={language})" if language else "") + "...")
     try:
         ds = load_dataset(
             "JetBrains-Research/commit-chronicle",
-            "subset_llm",
+            config,
             split="test",
-            trust_remote_code=True,
         )
         print(f"  Dataset loaded: {len(ds)} commits")
     except Exception as e:
@@ -165,7 +193,6 @@ def fetch_commit_chronicle_samples(num_samples: int, max_file_size: int = 50_000
                 "JetBrains-Research/commit-chronicle",
                 "default",
                 split="test[:5000]",
-                trust_remote_code=True,
             )
             print(f"  Fallback: {len(ds)} commits")
         except Exception as e2:
@@ -177,9 +204,14 @@ def fetch_commit_chronicle_samples(num_samples: int, max_file_size: int = 50_000
     # future schema drift without silent fallbacks.
     first_logged = False
 
+    language_lc = language.lower() if language else None
     for record in ds:
         if len(samples) >= num_samples:
             break
+        if language_lc is not None:
+            rec_lang = (record.get("language") or "").lower()
+            if rec_lang != language_lc:
+                continue
         # commit-chronicle has "mods" list with per-file changes
         mods = record.get("mods", [])
         for mod in mods:
@@ -360,6 +392,20 @@ def main():
     parser.add_argument("--num-gallery", type=int, default=1200)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--config",
+        default="subset_llm",
+        choices=["subset_llm", "subset_cmg", "default"],
+        help="commit-chronicle dataset config. subset_llm (4 k, saturated), "
+             "subset_cmg (204 k, multi-language, recommended for non-saturated eval), "
+             "or default (full dataset).",
+    )
+    parser.add_argument(
+        "--language",
+        default=None,
+        help="Filter to a specific language (e.g. 'Python'). Only meaningful for "
+             "subset_cmg and default configs.",
+    )
     args = parser.parse_args()
 
     print(f"Loading CodeWM from {args.checkpoint}...")
@@ -375,7 +421,11 @@ def main():
     cb_params = sum(p.numel() for p in cb_model.parameters())
 
     total_needed = args.num_query + args.num_gallery
-    samples = fetch_commit_chronicle_samples(total_needed)
+    samples = fetch_commit_chronicle_samples(
+        total_needed,
+        config=args.config,
+        language=args.language,
+    )
     if len(samples) < total_needed:
         print(f"Only got {len(samples)} samples, adjusting splits")
         total_needed = len(samples)
@@ -424,7 +474,8 @@ def main():
     cb_results = retrieval_metrics(cb_qd, cb_gd, qact_t, gact_t)
     bow_results = retrieval_metrics(bow_qd, bow_gd, qact_t, gact_t)
 
-    print("\n=== CommitChronicle subset_llm — Head-to-head MRR ===")
+    _label = f"CommitChronicle {args.config}" + (f" [{args.language}]" if args.language else "")
+    print(f"\n=== {_label} — Head-to-head MRR ===")
     print(f"{'Criterion':<25} {'CodeWM':<10} {'CodeBERT':<12} {'BoW':<10}")
     print("-" * 60)
     for criterion in ["by_edit_type", "by_joint", "by_action_cos_0.9", "by_action_cos_0.95"]:
@@ -449,7 +500,7 @@ def main():
     if args.out:
         with open(args.out, "w") as f:
             json.dump({
-                "dataset": "JetBrains-Research/commit-chronicle subset_llm",
+                "dataset": f"JetBrains-Research/commit-chronicle {args.config}" + (f" [{args.language}]" if args.language else ""),
                 "codewm": {"params": cw_params, "ms_per_sample": cw_time*1000/total_needed, "results": cw_results},
                 "codebert": {"params": cb_params, "ms_per_sample": cb_time*1000/total_needed, "results": cb_results},
                 "bow": {"results": bow_results},
