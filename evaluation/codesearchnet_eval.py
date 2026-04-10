@@ -73,7 +73,13 @@ def _load_code_wm_modules():
 
 
 def load_codewm(checkpoint_path: str, device: str = "cpu"):
-    os.environ.setdefault("WM_POOL_MODE", "cls")
+    # FIX: training uses WM_POOL_MODE=attn (default). Forcing "cls" here built
+    # the model without an attn_pool module, and load_state_dict(strict=False)
+    # silently dropped the checkpoint's attn_pool weights, giving a different
+    # (untrained) readout than training. All downstream numbers (retrieval
+    # metrics, baseline comparisons) were measured against this mismatched
+    # readout. Default to "attn" to match training.
+    os.environ.setdefault("WM_POOL_MODE", "attn")
     code_wm, _ = _load_code_wm_modules()
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
@@ -88,7 +94,11 @@ def load_codewm(checkpoint_path: str, device: str = "cpu"):
         ema_decay=cfg["ema_decay"],
         action_dim=cfg["action_dim"],
     )
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if missing or unexpected:
+        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+        if unexpected:
+            print(f"    unexpected sample: {unexpected[:3]}")
     model.to(device)
     model.train(False)
     return model, cfg

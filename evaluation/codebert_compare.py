@@ -46,7 +46,9 @@ def _load_code_wm_modules():
 
 
 def load_codewm(checkpoint_path: str, device: str = "cpu"):
-    os.environ.setdefault("WM_POOL_MODE", "cls")
+    # FIX: training uses WM_POOL_MODE=attn (default). See codesearchnet_eval.py
+    # load_codewm for full explanation of the silent strict=False drop.
+    os.environ.setdefault("WM_POOL_MODE", "attn")
     code_wm = _load_code_wm_modules()
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
@@ -61,7 +63,9 @@ def load_codewm(checkpoint_path: str, device: str = "cpu"):
         ema_decay=cfg["ema_decay"],
         action_dim=cfg["action_dim"],
     )
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if missing or unexpected:
+        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
     model.to(device)
     model.train(False)
     return model, cfg

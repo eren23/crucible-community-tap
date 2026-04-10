@@ -33,12 +33,13 @@ import torch
 import h5py
 from architectures.code_wm.code_wm import CodeWorldModel
 
-CKPT = '/Users/eren/.crucible-hub/taps/crucible-community-tap/checkpoints/ema-frozen-15k-best.pt'
-H5   = '/Users/eren/.crucible-hub/taps/crucible-community-tap/data/commitpack_python_trajectories_1.5m.h5'
+import os as _os
+CKPT = _os.environ.get('NULL_CKPT', '/Users/eren/.crucible-hub/taps/crucible-community-tap/checkpoints/ema-frozen-15k-best.pt')
+H5   = _os.environ.get('NULL_H5',   '/Users/eren/.crucible-hub/taps/crucible-community-tap/data/commitpack_python_trajectories_1.5m.h5')
 HELD_OUT_FRACTION_START = 0.95
 BATCH = 32
-MAX_TRIPLES = 2000
-SEED = 4242
+MAX_TRIPLES = int(_os.environ.get('NULL_MAX_TRIPLES', '2000'))
+SEED = int(_os.environ.get('NULL_SEED', '4242'))
 DEVICE = 'cpu'
 
 torch.manual_seed(SEED)

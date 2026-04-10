@@ -45,7 +45,11 @@ def _load_code_wm_modules():
 
 
 def load_model(checkpoint_path: str, device: str = "cpu"):
-    os.environ.setdefault("WM_POOL_MODE", "cls")
+    # FIX: training uses WM_POOL_MODE=attn (the default). Forcing "cls" here
+    # built the model without an attn_pool, and strict=False silently dropped
+    # the checkpoint's attn_pool weights, giving a different readout than
+    # training. Default to "attn" to match training.
+    os.environ.setdefault("WM_POOL_MODE", "attn")
     code_wm = _load_code_wm_modules()
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg = ckpt["config"]
@@ -60,7 +64,11 @@ def load_model(checkpoint_path: str, device: str = "cpu"):
         ema_decay=cfg["ema_decay"],
         action_dim=cfg["action_dim"],
     )
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
+    if missing or unexpected:
+        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
+        if unexpected:
+            print(f"    unexpected sample: {unexpected[:3]}")
     model.to(device)
     model.train(False)
     return model, cfg
@@ -217,12 +225,17 @@ def run_trajectory(checkpoint: str, repo: str, min_edits: int = 4, max_steps: in
     t0 = time.time()
     toks = np.stack([ast_tokenize(s, max_len=max_len) for s in all_states], axis=0)
     toks_t = torch.from_numpy(toks.astype(np.int64)).to(device)
-    z_all = model.encode(toks_t)
+    # Compute BOTH online encoder outputs (for state-space metrics and rollout
+    # starting point) and target encoder outputs (for mixed-formula deltas that
+    # match the training metric: delta_true = target(s_{k+1}) - online(s_k)).
+    z_all = model.state_encoder(toks_t)             # online encoder
+    z_target_all = model.target_encoder(toks_t)    # target (EMA) encoder
     print(f"  encoded in {time.time()-t0:.1f}s")
 
     N_traj = len(trajs)
     D = z_all.shape[1]
     z_states = z_all.reshape(N_traj, max_steps + 1, D)
+    z_target_states = z_target_all.reshape(N_traj, max_steps + 1, D)
 
     print(f"Computing actions ({max_steps} transitions × {N_traj} trajs)...")
     actions_all = np.zeros((N_traj, max_steps, action_dim), dtype=np.float32)
@@ -233,14 +246,14 @@ def run_trajectory(checkpoint: str, repo: str, min_edits: int = 4, max_steps: in
             actions_all[i, k] = rich[:action_dim]
     actions_t = torch.from_numpy(actions_all).to(device)
 
-    # Teacher-forced
+    # Teacher-forced: pred starts from online(s_k)
     teacher_forced = []
     for k in range(max_steps):
         z_prev_gt = z_states[:, k, :]
         a_k = actions_t[:, k, :]
         teacher_forced.append(model.predict_next(z_prev_gt, a_k))
 
-    # Rolled-out
+    # Rolled-out: pred starts from online(s_0), then feeds its own output back
     rolled_out = []
     z_cur = z_states[:, 0, :].clone()
     for k in range(max_steps):
@@ -251,10 +264,11 @@ def run_trajectory(checkpoint: str, repo: str, min_edits: int = 4, max_steps: in
     results = {"per_step": [], "model_dim": cfg["model_dim"], "n_traj": N_traj}
     print(f"\nPer-step metrics (N_traj={N_traj}):")
     print(f"{'step':>4} {'teach_cos':>10} {'rolled_cos':>11} {'copy_cos':>10} "
-          f"{'rand_cos':>10} {'norm_rat':>10} {'delta_cos':>10}")
+          f"{'rand_cos':>10} {'norm_rat':>10} {'dcos_on':>9} {'dcos_mix':>9}")
     for k in range(max_steps):
-        z_gt = z_states[:, k + 1, :]
-        z_prev_gt = z_states[:, k, :]
+        z_gt = z_states[:, k + 1, :]                   # online(s_{k+1})
+        z_gt_target = z_target_states[:, k + 1, :]     # target(s_{k+1}) — training's "true" target
+        z_prev_gt = z_states[:, k, :]                  # online(s_k)
         z_teach = teacher_forced[k]
         z_roll = rolled_out[k]
         teach_cos = F.cosine_similarity(z_teach, z_gt, dim=-1).mean().item()
@@ -265,15 +279,30 @@ def run_trajectory(checkpoint: str, repo: str, min_edits: int = 4, max_steps: in
                            z_rand.norm(dim=-1, keepdim=True).clamp_min(1e-8))
         rand_cos = F.cosine_similarity(z_rand, z_gt, dim=-1).mean().item()
         norm_ratio = (z_roll.norm(dim=-1) / z_teach.norm(dim=-1).clamp_min(1e-8)).mean().item()
-        pred_delta = z_roll - (z_states[:, 0, :] if k == 0 else rolled_out[k - 1])
-        true_delta = z_gt - z_prev_gt
-        delta_cos = F.cosine_similarity(pred_delta, true_delta, dim=-1).mean().item()
+
+        # (A) online delta (legacy): delta_true = online(s_{k+1}) - online(s_k),
+        #     delta_pred = rolled_pred - previous_rolled_or_online(s_0)
+        pred_delta_online = z_roll - (z_states[:, 0, :] if k == 0 else rolled_out[k - 1])
+        true_delta_online = z_gt - z_prev_gt
+        delta_cos_online = F.cosine_similarity(pred_delta_online, true_delta_online, dim=-1).mean().item()
+
+        # (B) MIXED delta (matches training metric wm_base.py:432-434):
+        #     delta_true = target(s_{k+1}) - online(s_k)
+        #     delta_pred = teacher_forced_pred - online(s_k)
+        #     Teacher-forced only; rollout in this space is ill-defined because
+        #     predict_next is trained for online-space inputs.
+        pred_delta_mixed = z_teach - z_prev_gt
+        true_delta_mixed = z_gt_target - z_prev_gt
+        delta_cos_mixed = F.cosine_similarity(pred_delta_mixed, true_delta_mixed, dim=-1).mean().item()
+
         step_r = {"step": k + 1, "teacher_forced_cos": teach_cos, "rolled_out_cos": rolled_cos,
                   "copy_last_cos": copy_cos, "random_cos": rand_cos,
-                  "rolled_norm_ratio_to_teach": norm_ratio, "rolled_delta_dir_cos": delta_cos}
+                  "rolled_norm_ratio_to_teach": norm_ratio,
+                  "delta_cos_online": delta_cos_online,
+                  "delta_cos_mixed_teacher_forced": delta_cos_mixed}
         results["per_step"].append(step_r)
         print(f"{k+1:>4} {teach_cos:>10.4f} {rolled_cos:>11.4f} {copy_cos:>10.4f} "
-              f"{rand_cos:>10.4f} {norm_ratio:>10.4f} {delta_cos:>10.4f}")
+              f"{rand_cos:>10.4f} {norm_ratio:>10.4f} {delta_cos_online:>9.4f} {delta_cos_mixed:>9.4f}")
 
     print("\nVerdict:")
     step_checks = []
