@@ -123,6 +123,22 @@ def encode_hf_model(
                 raise ValueError(f"Unknown pooling: {pooling}")
         elif hasattr(out, "pooler_output") and out.pooler_output is not None:
             pooled = out.pooler_output
+        elif isinstance(out, torch.Tensor):
+            # Some models (e.g. Salesforce/codet5p-110m-embedding) return the
+            # pooled embedding directly as a bare Tensor instead of an HF
+            # BaseModelOutput dataclass. Handle both 2D ([B, D] — already
+            # pooled) and 3D ([B, S, D] — needs pooling) cases.
+            if out.dim() == 2:
+                pooled = out
+            elif out.dim() == 3:
+                if pooling == "mean":
+                    mask = enc["attention_mask"].unsqueeze(-1).float()
+                    pooled = (out * mask).sum(1) / mask.sum(1).clamp_min(1)
+                else:
+                    pooled = out[:, 0]
+            else:
+                print(f"  [skip {model_id}] unsupported bare-Tensor rank: {out.dim()}")
+                return None
         else:
             # Some models (e.g. sentence-transformers-wrapped) expose a
             # ``sentence_embedding`` or similar attribute. Try a fallback.
