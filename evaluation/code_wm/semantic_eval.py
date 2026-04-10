@@ -42,7 +42,8 @@ def load_model_and_data(
     import h5py
     import importlib.util
 
-    tap_root = Path(__file__).parent.parent
+    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
+    tap_root = Path(__file__).parent.parent.parent
     for mod_name, mod_path in [
         ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
         ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),

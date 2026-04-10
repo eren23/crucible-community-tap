@@ -41,7 +41,8 @@ import torch.nn.functional as F
 
 
 def _load_code_wm_modules():
-    tap_root = Path(__file__).parent.parent
+    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
+    tap_root = Path(__file__).parent.parent.parent
     if not (tap_root / "architectures" / "wm_base" / "wm_base.py").exists():
         tap_root = Path("/workspace/crucible-community-tap")
     for mod_name, mod_path in [

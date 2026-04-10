@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 def load_model(checkpoint_path: str, device: str = "cpu") -> Any:
     """Load a saved CodeWorldModel checkpoint."""
     # Import code_wm module which registers the model
-    code_wm_path = Path(__file__).parent.parent / "architectures" / "code_wm" / "code_wm.py"
+    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
+    code_wm_path = Path(__file__).parent.parent.parent / "architectures" / "code_wm" / "code_wm.py"
     if code_wm_path.exists():
         import importlib.util
         spec = importlib.util.spec_from_file_location("code_wm", code_wm_path)

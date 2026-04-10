@@ -1,0 +1,26 @@
+name: code_wm
+type: evaluations
+version: 0.1.0
+description: >
+  Evaluation bundle for the CodeWM (Code World Model) project: rollout,
+  retrieval, null-model, baseline-comparison, and semantic-similarity scripts.
+  All scripts in this bundle load CodeWorldModel checkpoints via the tap's
+  architectures/code_wm plugin and are scoped to that architecture.
+author: eren23
+tags: [code-intelligence, world-model, rollout, retrieval, baselines]
+crucible_compat: ">=0.2,<0.3"
+scripts:
+  - rollout_eval.py            # Multi-step rollout on in-dist HDF5 or OOD git repos
+  - null_models_rollout.py     # Delta-space null models (trivial, shuffled, mean_delta, etc.)
+  - cross_repo_eval.py         # Leave-one-repo-out retrieval on 20 held-out Python repos
+  - cross_repo_modern_compare.py  # CodeWM vs modern baselines on cross-repo retrieval
+  - modern_baselines_compare.py   # CodeWM vs CodeBERT/BGE/etc. on CodeSearchNet-style tasks
+  - codesearchnet_eval.py      # CodeSearchNet Python retrieval benchmark
+  - codebert_compare.py        # Head-to-head vs CodeBERT
+  - commit_chronicle_eval.py   # Commit-chronicle retrieval evaluation
+  - honest_retrieval.py        # Honest retrieval (edit-type × scope) metric
+  - semantic_eval.py           # Semantic similarity of before/after states
+  - eval_code_wm.py            # Legacy eval (old grouped HDF5 format; needs update)
+shared_helpers:
+  - ../baselines.py            # BoW + random baseline (lives at evaluation/ top level)
+  - ../rescore_wandb_history.py
