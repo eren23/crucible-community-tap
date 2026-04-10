@@ -195,7 +195,10 @@ def encode_edit_pairs(
 
 
 def compute_actions_for_pairs(pairs: list[tuple[str, str]]) -> np.ndarray:
-    sys.path.insert(0, str(THIS_DIR.parent))
+    # collectors/ lives at the tap root, two levels above evaluation/code_wm/.
+    tap_root = THIS_DIR.parent.parent
+    if str(tap_root) not in sys.path:
+        sys.path.insert(0, str(tap_root))
     from collectors.commitpack_processor import compute_action  # type: ignore
     out = np.stack([compute_action(old, new) for old, new in pairs])
     return out.astype(np.float32)
