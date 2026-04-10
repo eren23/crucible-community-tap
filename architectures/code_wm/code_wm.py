@@ -54,12 +54,49 @@ except ImportError:
     register_model = None  # Standalone mode (no full Crucible install)
 
 # ---------------------------------------------------------------------------
-# Import shared components from wm_base (sibling plugin in the tap)
+# Import shared components from wm_base.
+#
+# wm_base lives in ITS OWN plugin directory (architectures/wm_base/) in the
+# tap source, but when wm_base is installed via `crucible tap install wm_base
+# --type architectures` it lands as a flat file at
+# ~/.crucible-hub/plugins/architectures/wm_base.py — no nested subdir. To
+# support both the tap-source layout and every crucible tap install layout,
+# try a list of candidate paths.
 # ---------------------------------------------------------------------------
-_wm_base_path = Path(__file__).parent.parent / "wm_base" / "wm_base.py"
+def _discover_wm_base_path() -> Path:
+    here = Path(__file__).parent
+    candidates = [
+        # 1. Tap source layout: architectures/code_wm/code_wm.py imports
+        #    architectures/wm_base/wm_base.py as a "sibling plugin".
+        here.parent / "wm_base" / "wm_base.py",
+        # 2. Flat-install layout: tap install copies both plugins to
+        #    ~/.crucible-hub/plugins/architectures/{code_wm,wm_base}.py.
+        here / "wm_base.py",
+        # 3. Bundle-install layout: wm_base installed as a directory bundle
+        #    alongside code_wm.py.
+        here / "wm_base" / "wm_base.py",
+        # 4. Same layout as (3) but from bundle-installed code_wm (the
+        #    code_wm.py file lives INSIDE its own directory).
+        here.parent / "wm_base.py",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    # Fall back to the historic location so the error message points
+    # somewhere obvious.
+    return candidates[0]
+
+_wm_base_path = _discover_wm_base_path()
 _spec = importlib.util.spec_from_file_location("wm_base", _wm_base_path)
 if _spec is None or _spec.loader is None:
-    raise ImportError(f"Cannot load wm_base from {_wm_base_path}")
+    raise ImportError(
+        f"Cannot load wm_base. Tried: "
+        + ", ".join(str(p) for p in [
+            Path(__file__).parent.parent / "wm_base" / "wm_base.py",
+            Path(__file__).parent / "wm_base.py",
+            Path(__file__).parent / "wm_base" / "wm_base.py",
+        ])
+    )
 _wm_base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_wm_base)
 
