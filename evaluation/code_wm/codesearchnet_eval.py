@@ -47,7 +47,7 @@ import torch.nn.functional as F
 _THIS_DIR = Path(__file__).parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
-from _shared import load_codewm  # noqa: E402  (re-exported for historical callers)
+from _shared import load_codewm, resolve_tap_root  # noqa: E402  (re-exported for historical callers)
 
 
 def fetch_codesearchnet_samples(num_samples: int, seed: int = 42):
@@ -89,7 +89,7 @@ def fetch_codesearchnet_samples(num_samples: int, seed: int = 42):
 
 @torch.no_grad()
 def encode_codewm(model, samples, max_seq_len, device, batch_size=32):
-    _, tap_root = _load_code_wm_modules()
+    tap_root = resolve_tap_root()
     collectors_dir = str(tap_root)
     if collectors_dir not in sys.path:
         sys.path.insert(0, collectors_dir)
@@ -106,7 +106,7 @@ def encode_codewm(model, samples, max_seq_len, device, batch_size=32):
 
 
 def encode_bow(samples, max_seq_len, vocab_size=664):
-    _, tap_root = _load_code_wm_modules()
+    tap_root = resolve_tap_root()
     collectors_dir = str(tap_root)
     if collectors_dir not in sys.path:
         sys.path.insert(0, collectors_dir)

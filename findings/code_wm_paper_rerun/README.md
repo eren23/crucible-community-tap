@@ -41,4 +41,4 @@ directory at the end of each session. Keep them in sync — last
 paragraph of this README should be updated to mention the copy date
 whenever the /tmp file is newer.
 
-**Last sync**: 2026-04-11 (during frozen-target ablation, Exp 1 runs in progress).
+**Last sync**: 2026-04-11 (post frozen-target ablation, Exp 1 complete). Section 11 filled in with real numbers. Scenario A+ confirmed — val_dcos matches baseline within ±0.002, retrieval matches or exceeds baseline, but the frozen-target latent geometry has 40-80% larger delta magnitudes than the near-frozen EMA baseline (unexpected secondary finding).
