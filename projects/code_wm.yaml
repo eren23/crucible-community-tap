@@ -253,3 +253,42 @@ variants:
     WM_CONTRAST_POS_THRESHOLD: "0.9"
     WM_SEED: "44"
     WANDB_RUN_NAME: "phase5-contrast-high-3k-seed3"
+
+  # ── Round 5.8 ablation (2026-04-11) — frozen target (WM_EMA_DECAY=1.0) ──
+  # Tests the hypothesis: does the target encoder need to track the state
+  # encoder at all, or is a fully frozen random-init projection enough?
+  # At EMA=0.99999 the target picks up ~14% of state-encoder motion over 15K
+  # steps; at EMA=1.0 it stays at its initial copy.deepcopy(state_encoder)
+  # snapshot (i.e., random-init weights) forever. Both variants match the
+  # phase5_ema_frozen_15k recipe exactly except for WM_EMA_DECAY and seed,
+  # so the head-to-head is apples-to-apples against pred_s43.
+
+  phase5_frozen_target_15k_seed42:
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "15000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "1.0"
+    WM_SEED: "42"
+    WANDB_RUN_NAME: "phase5-frozen-target-15k-seed42"
+
+  phase5_frozen_target_15k_seed43:
+    WM_HDF5_PATH: "commitpack_python_trajectories_1.5m.h5"
+    WM_MODEL_DIM: "128"
+    WM_NUM_LOOPS: "6"
+    WM_NUM_HEADS: "4"
+    WM_ENCODER_LOOPS: "6"
+    ACTION_DIM: "7"
+    WM_LR: "1e-4"
+    WM_BATCH_SIZE: "128"
+    WM_STEPS: "15000"
+    WM_WINDOW_LEN: "3"
+    WM_EMA_DECAY: "1.0"
+    WM_SEED: "43"
+    WANDB_RUN_NAME: "phase5-frozen-target-15k-seed43"
