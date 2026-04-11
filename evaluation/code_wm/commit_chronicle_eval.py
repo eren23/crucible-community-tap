@@ -40,60 +40,19 @@ import torch
 import torch.nn.functional as F
 
 
-def _resolve_tap_root() -> Path:
-    tap_root = Path(__file__).parent.parent.parent
-    if not (tap_root / "architectures" / "wm_base" / "wm_base.py").exists():
-        tap_root = Path("/workspace/crucible-community-tap")
-    return tap_root
+# Shared checkpoint loader — see _shared.py. This used to be ~60 lines of
+# duplicated _resolve_tap_root + _load_code_wm_modules + load_codewm.
+_THIS_DIR = Path(__file__).parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+from _shared import load_codewm, resolve_tap_root  # noqa: E402
 
-
-# Make `from collectors...` importable regardless of cwd / pod layout. The
-# three `sys.path.insert(0, "/workspace/crucible-community-tap")` inside
-# compute_actions/encode_codewm/bow_encode were written for the RunPod layout;
-# when running locally from the tap clone the tap root is not at /workspace.
-_TAP_ROOT = _resolve_tap_root()
+# Also ensure the tap root is on sys.path so `from collectors...` imports
+# downstream (in compute_actions/encode_codewm/bow_encode) resolve regardless
+# of cwd / pod layout.
+_TAP_ROOT = resolve_tap_root()
 if str(_TAP_ROOT) not in sys.path:
     sys.path.insert(0, str(_TAP_ROOT))
-
-
-def _load_code_wm_modules():
-    tap_root = _TAP_ROOT
-    for mod_name, mod_path in [
-        ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
-        ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),
-    ]:
-        spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = mod
-        spec.loader.exec_module(mod)
-    import code_wm
-    return code_wm
-
-
-def load_codewm(checkpoint_path: str, device: str = "cpu"):
-    # FIX: training uses WM_POOL_MODE=attn (default). See codesearchnet_eval.py
-    # load_codewm for full explanation of the silent strict=False drop.
-    os.environ.setdefault("WM_POOL_MODE", "attn")
-    code_wm = _load_code_wm_modules()
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = ckpt["config"]
-    model = code_wm.CodeWorldModel(
-        vocab_size=cfg["vocab_size"],
-        max_seq_len=cfg["max_seq_len"],
-        encoder_loops=cfg["encoder_loops"],
-        model_dim=cfg["model_dim"],
-        num_loops=cfg["num_loops"],
-        num_heads=cfg["num_heads"],
-        predictor_depth=2,
-        ema_decay=cfg["ema_decay"],
-        action_dim=cfg["action_dim"],
-    )
-    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    if missing or unexpected:
-        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
-    model.to(device)
-    model.train(False)
-    return model, cfg
 
 
 def extract_hunks_from_diff(diff_text: str) -> tuple[str, str] | None:

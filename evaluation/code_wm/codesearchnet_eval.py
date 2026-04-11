@@ -40,69 +40,14 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-
-_CODE_WM_CACHE: tuple | None = None
-
-
-def _load_code_wm_modules():
-    """Idempotently import the tap's code_wm module (registers model once)."""
-    global _CODE_WM_CACHE
-    if _CODE_WM_CACHE is not None:
-        return _CODE_WM_CACHE
-
-    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
-    tap_root = Path(__file__).parent.parent.parent
-    if not (tap_root / "architectures" / "wm_base" / "wm_base.py").exists():
-        tap_root = Path("/workspace/crucible-community-tap")
-    # Make sure the tap root is on sys.path so `from collectors...` works.
-    tap_root_str = str(tap_root)
-    if tap_root_str not in sys.path:
-        sys.path.insert(0, tap_root_str)
-    for mod_name, mod_path in [
-        ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
-        ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),
-    ]:
-        if mod_name in sys.modules:
-            continue
-        spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = mod
-        spec.loader.exec_module(mod)
-    import code_wm  # type: ignore
-    _CODE_WM_CACHE = (code_wm, tap_root)
-    return _CODE_WM_CACHE
-
-
-def load_codewm(checkpoint_path: str, device: str = "cpu"):
-    # FIX: training uses WM_POOL_MODE=attn (default). Forcing "cls" here built
-    # the model without an attn_pool module, and load_state_dict(strict=False)
-    # silently dropped the checkpoint's attn_pool weights, giving a different
-    # (untrained) readout than training. All downstream numbers (retrieval
-    # metrics, baseline comparisons) were measured against this mismatched
-    # readout. Default to "attn" to match training.
-    os.environ.setdefault("WM_POOL_MODE", "attn")
-    code_wm, _ = _load_code_wm_modules()
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = ckpt["config"]
-    model = code_wm.CodeWorldModel(
-        vocab_size=cfg["vocab_size"],
-        max_seq_len=cfg["max_seq_len"],
-        encoder_loops=cfg["encoder_loops"],
-        model_dim=cfg["model_dim"],
-        num_loops=cfg["num_loops"],
-        num_heads=cfg["num_heads"],
-        predictor_depth=2,
-        ema_decay=cfg["ema_decay"],
-        action_dim=cfg["action_dim"],
-    )
-    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    if missing or unexpected:
-        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
-        if unexpected:
-            print(f"    unexpected sample: {unexpected[:3]}")
-    model.to(device)
-    model.train(False)
-    return model, cfg
+# Shared checkpoint loader — see _shared.py. `load_codewm` is re-exported
+# here so downstream scripts (cross_repo_eval.py, cross_repo_modern_compare.py,
+# modern_baselines_compare.py) can continue to `from codesearchnet_eval import load_codewm`
+# without a mass-rename.
+_THIS_DIR = Path(__file__).parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+from _shared import load_codewm  # noqa: E402  (re-exported for historical callers)
 
 
 def fetch_codesearchnet_samples(num_samples: int, seed: int = 42):

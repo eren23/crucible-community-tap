@@ -42,49 +42,10 @@ import torch
 import torch.nn.functional as F
 
 THIS_DIR = Path(__file__).parent
-sys.path.insert(0, str(THIS_DIR))
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
 
-
-def _load_code_wm_modules():
-    tap_root = Path(__file__).parent.parent.parent
-    if not (tap_root / "architectures" / "wm_base" / "wm_base.py").exists():
-        tap_root = Path("/Users/eren/.crucible-hub/taps/crucible-community-tap")
-    for mod_name, mod_path in [
-        ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
-        ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),
-    ]:
-        spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = mod
-        spec.loader.exec_module(mod)
-    import code_wm
-    return code_wm
-
-
-def load_model(checkpoint_path: str, device: str = "cpu"):
-    os.environ.setdefault("WM_POOL_MODE", "attn")
-    code_wm = _load_code_wm_modules()
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = ckpt["config"]
-    model = code_wm.CodeWorldModel(
-        vocab_size=cfg["vocab_size"],
-        max_seq_len=cfg["max_seq_len"],
-        encoder_loops=cfg["encoder_loops"],
-        model_dim=cfg["model_dim"],
-        num_loops=cfg["num_loops"],
-        num_heads=cfg["num_heads"],
-        predictor_depth=2,
-        ema_decay=cfg["ema_decay"],
-        action_dim=cfg["action_dim"],
-    )
-    missing, unexpected = model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    if missing or unexpected:
-        print(f"  [warn] load_state_dict: missing={len(missing)} unexpected={len(unexpected)}")
-        if unexpected:
-            print(f"    unexpected sample: {unexpected[:3]}")
-    model.to(device)
-    model.train(False)
-    return model, cfg
+from _shared import load_codewm as load_model  # noqa: E402
 
 
 def _h5_gather(ds, flat_indices: np.ndarray) -> np.ndarray:
