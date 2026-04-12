@@ -36,7 +36,7 @@ from _shared import load_codewm as load_model  # noqa: E402
 
 
 def _get_tap_module(name: str, rel_path: str):
-    tap_root = Path("/Users/eren/.crucible-hub/taps/crucible-community-tap")
+    tap_root = Path(__file__).resolve().parent.parent.parent
     spec = importlib.util.spec_from_file_location(name, tap_root / rel_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

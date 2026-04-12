@@ -29,10 +29,19 @@ Env vars (all with sensible defaults):
     WM_MLP_RATIO:        MLP hidden-dim ratio in transformer blocks (default: 4.0)
     WM_DROPOUT:          Dropout rate in predictor (default: 0.1)
     ACTION_DIM:          Action vector dimensionality (default: 4)
+
+Rollout robustness (Phase 6 — all opt-in, default disabled):
+    WM_NOISE_SIGMA:          Gaussian noise std on z_state during training (default: 0.0)
+    WM_NOISE_ANNEAL_STEPS:   Steps to anneal noise sigma to 0 (default: 0 = constant)
+    WM_SCHEDULED_ROLLOUT:    "1" to enable scheduled rollout in main loop (default: "0")
+    WM_ROLLOUT_WARMUP:       Steps before rollout probability starts rising (default: 2000)
+    WM_ROLLOUT_MAX_PROB:     Max probability of using predicted z (default: 0.5)
+    WM_NORM_PROJECT:         "1" to project predictions to encoder norm (default: "0")
 """
 from __future__ import annotations
 
 import copy
+import math
 import os
 from abc import abstractmethod
 from typing import Any
@@ -197,6 +206,13 @@ class WorldModelBase(CrucibleModel):
         lambda_contrast: float = 0.0,
         contrast_temperature: float = 0.07,
         contrast_pos_threshold: float = 0.9,
+        # ── Rollout robustness (Phase 6, opt-in) ──
+        noise_sigma: float = 0.0,
+        noise_anneal_steps: int = 0,
+        scheduled_rollout: bool = False,
+        rollout_warmup_steps: int = 2000,
+        rollout_max_prob: float = 0.5,
+        norm_project: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -219,6 +235,13 @@ class WorldModelBase(CrucibleModel):
         self.lambda_contrast = lambda_contrast
         self.contrast_temperature = contrast_temperature
         self.contrast_pos_threshold = contrast_pos_threshold
+        # Phase 6: rollout robustness
+        self.noise_sigma = noise_sigma
+        self.noise_anneal_steps = noise_anneal_steps
+        self.scheduled_rollout = scheduled_rollout
+        self.rollout_warmup_steps = rollout_warmup_steps
+        self.rollout_max_prob = rollout_max_prob
+        self.norm_project = norm_project
 
     def _build_common(self, state_encoder: nn.Module, action_encoder: nn.Module) -> None:
         """Initialize shared components after subclass sets encoders.
@@ -266,6 +289,29 @@ class WorldModelBase(CrucibleModel):
             nn.GELU(),
             nn.Linear(proj_dim, self.model_dim),
         )
+
+        # Step counter for scheduled rollout / noise annealing
+        self.register_buffer("_train_step", torch.tensor(0, dtype=torch.long))
+
+    # ── Phase 6: Rollout robustness helpers ──
+
+    def _get_rollout_prob(self) -> float:
+        """Compute scheduled rollout probability based on training step."""
+        step = self._train_step.item()
+        if step < self.rollout_warmup_steps:
+            return 0.0
+        # Linear ramp from 0 to max_prob over rollout_warmup_steps after warmup
+        ramp_steps = max(self.rollout_warmup_steps, 1)
+        progress = min((step - self.rollout_warmup_steps) / ramp_steps, 1.0)
+        return self.rollout_max_prob * progress
+
+    def _get_current_sigma(self) -> float:
+        """Compute current noise sigma (optionally annealed)."""
+        if self.noise_anneal_steps <= 0:
+            return self.noise_sigma
+        step = self._train_step.item()
+        progress = min(step / self.noise_anneal_steps, 1.0)
+        return self.noise_sigma * (1.0 - progress)
 
     @abstractmethod
     def build_state_encoder(self, args: Any) -> nn.Module:
@@ -391,12 +437,39 @@ class WorldModelBase(CrucibleModel):
             z_target = self.target_encoder(flat_next_states).reshape(B, num_transitions, -1)  # [B, T-1, D]
 
         # Predict next-state embeddings for each transition
+        # Phase 6: optionally inject noise and/or use scheduled rollout
         pred_list = []
+        use_noise = self.training and self.noise_sigma > 0
+        use_sched = self.training and self.scheduled_rollout and num_transitions > 1
+        current_sigma = self._get_current_sigma() if use_noise else 0.0
+        rollout_prob = self._get_rollout_prob() if use_sched else 0.0
+        # Pre-compute encoder norm for norm projection
+        if self.norm_project:
+            with torch.no_grad():
+                _enc_norms = z_all.reshape(-1, self.model_dim).norm(dim=-1)
+                _enc_mean_norm = _enc_norms.mean()
+
         for t in range(num_transitions):
-            z_pred_t = self.predictor(
-                z_all[:, t].detach(),  # detach encoder from predictor path
-                z_action[:, t],
-            )
+            # Select input: teacher-forced or rolled-out
+            if t > 0 and use_sched and rollout_prob > 0:
+                if torch.rand(1).item() < rollout_prob:
+                    z_input = pred_list[t - 1].detach()
+                else:
+                    z_input = z_all[:, t].detach()
+            else:
+                z_input = z_all[:, t].detach()
+
+            # Noise injection: simulate off-manifold inputs
+            if use_noise and current_sigma > 0:
+                z_input = z_input + torch.randn_like(z_input) * current_sigma
+
+            z_pred_t = self.predictor(z_input, z_action[:, t])
+
+            # Norm projection: keep predictions on the encoder norm ball
+            if self.norm_project:
+                pred_norm = z_pred_t.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                z_pred_t = z_pred_t * (_enc_mean_norm / pred_norm)
+
             pred_list.append(z_pred_t)
 
         pred_embeddings = torch.stack(pred_list, dim=1)  # [B, T-1, D]
@@ -583,9 +656,10 @@ class WorldModelBase(CrucibleModel):
                     else:
                         loss_contrast = torch.tensor(0.0, device=states.device)
 
-        # Update EMA target encoder
+        # Update EMA target encoder and step counter
         if self.training:
             self._update_ema()
+            self._train_step += 1
 
         return {
             "loss": loss,
@@ -602,6 +676,9 @@ class WorldModelBase(CrucibleModel):
             "pred_embeddings": pred_embeddings,
             "target_embeddings": z_target,
             "z_std": z_std,
+            # Phase 6 diagnostics
+            "noise_sigma": torch.tensor(current_sigma if use_noise else 0.0),
+            "rollout_prob": torch.tensor(rollout_prob if use_sched else 0.0),
         }
 
     def training_step(self, **batch: Any) -> dict[str, Tensor]:
@@ -700,4 +777,11 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "lambda_contrast": float(_get("lambda_contrast", "WM_LAMBDA_CONTRAST", "0.0")),
         "contrast_temperature": float(_get("contrast_temperature", "WM_CONTRAST_TEMPERATURE", "0.07")),
         "contrast_pos_threshold": float(_get("contrast_pos_threshold", "WM_CONTRAST_POS_THRESHOLD", "0.9")),
+        # Rollout robustness (Phase 6, opt-in)
+        "noise_sigma": float(_get("noise_sigma", "WM_NOISE_SIGMA", "0.0")),
+        "noise_anneal_steps": int(_get("noise_anneal_steps", "WM_NOISE_ANNEAL_STEPS", "0")),
+        "scheduled_rollout": _get("scheduled_rollout", "WM_SCHEDULED_ROLLOUT", "0") == "1",
+        "rollout_warmup_steps": int(_get("rollout_warmup_steps", "WM_ROLLOUT_WARMUP", "2000")),
+        "rollout_max_prob": float(_get("rollout_max_prob", "WM_ROLLOUT_MAX_PROB", "0.5")),
+        "norm_project": _get("norm_project", "WM_NORM_PROJECT", "0") == "1",
     }

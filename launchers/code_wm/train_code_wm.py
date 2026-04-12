@@ -69,6 +69,11 @@ def main():
     lr_peak_step = int(os.environ.get("WM_LR_PEAK_STEP", "0"))
     ema_start = float(os.environ.get("WM_EMA_START", str(ema_decay)))
 
+    # Phase 6 config (rollout robustness)
+    noise_sigma = float(os.environ.get("WM_NOISE_SIGMA", "0.0"))
+    scheduled_rollout = os.environ.get("WM_SCHEDULED_ROLLOUT", "0") == "1"
+    norm_project = os.environ.get("WM_NORM_PROJECT", "0") == "1"
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -142,6 +147,13 @@ def main():
         print(f"  Dropout:    ramped 0 -> target over {warmup_steps} steps")
     if ema_start != ema_decay:
         print(f"  EMA:        {ema_start} -> {ema_decay} annealed")
+    if noise_sigma > 0:
+        print(f"  Noise:      sigma={noise_sigma} (anneal={os.environ.get('WM_NOISE_ANNEAL_STEPS', '0')})")
+    if scheduled_rollout:
+        print(f"  Sched roll: warmup={os.environ.get('WM_ROLLOUT_WARMUP', '2000')}, "
+              f"max_prob={os.environ.get('WM_ROLLOUT_MAX_PROB', '0.5')}")
+    if norm_project:
+        print(f"  Norm proj:  enabled")
     print(f"  Training:   {total_steps} steps, batch={batch_size}, lr={lr}")
     print(f"  W&B:        {wandb_project}")
     print()
@@ -181,6 +193,8 @@ def main():
                 "bounded_residual": bounded_residual, "residual_scale": residual_scale,
                 "dir_loss_until": dir_loss_until, "dropout_ramp": dropout_ramp,
                 "ema_start": ema_start, "num_trajectories": num_trajectories,
+                "noise_sigma": noise_sigma, "scheduled_rollout": scheduled_rollout,
+                "norm_project": norm_project,
             },
         )
         use_wandb = True
@@ -373,6 +387,11 @@ def main():
                 log_dict["train/loss_path_consistency"] = loss_path
             if dir_loss_until > 0:
                 log_dict["train/lambda_dir"] = model.lambda_dir
+            # Phase 6 diagnostics
+            if noise_sigma > 0:
+                log_dict["train/noise_sigma"] = out.get("noise_sigma", torch.tensor(0.0)).item()
+            if scheduled_rollout:
+                log_dict["train/rollout_prob"] = out.get("rollout_prob", torch.tensor(0.0)).item()
             wandb.log(log_dict, step=step)
 
         if step % eval_interval == 0:
