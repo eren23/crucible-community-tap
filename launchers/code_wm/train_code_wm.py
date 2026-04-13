@@ -257,14 +257,22 @@ def main():
     before_ds = f["before_tokens"]
     after_ds = f["after_tokens"]
     action_ds = f["edit_actions"]
+    has_diffs = "diff_tokens" in f
+    diff_ds = f["diff_tokens"] if has_diffs else None
+    if has_diffs:
+        print(f"  Diff tokens: available (delta mode ready)")
 
     def get_single_step_batch(pool_indices):
         """Classic single-step batch: states=[B,2,S], actions=[B,1,A]."""
         idx = np.sort(np.random.choice(pool_indices, size=batch_size, replace=False))
-        before = torch.from_numpy(before_ds[idx.tolist()].astype(np.int64)).to(device)
-        actions = torch.from_numpy(action_ds[idx.tolist()].astype(np.float32)).to(device)
-        after = torch.from_numpy(after_ds[idx.tolist()].astype(np.int64)).to(device)
-        return {"states": torch.stack([before, after], dim=1), "actions": actions.unsqueeze(1)}
+        idx_list = idx.tolist()
+        before = torch.from_numpy(before_ds[idx_list].astype(np.int64)).to(device)
+        actions = torch.from_numpy(action_ds[idx_list].astype(np.float32)).to(device)
+        after = torch.from_numpy(after_ds[idx_list].astype(np.int64)).to(device)
+        batch = {"states": torch.stack([before, after], dim=1), "actions": actions.unsqueeze(1)}
+        if diff_ds is not None:
+            batch["diff_tokens"] = torch.from_numpy(diff_ds[idx_list].astype(np.int64)).to(device).unsqueeze(1)
+        return batch
 
     def get_trajectory_batch(eligible_pool):
         """Multi-step trajectory batch: states=[B,W+1,S], actions=[B,W,A]."""
@@ -273,6 +281,7 @@ def main():
 
         all_states = np.zeros((batch_size, W + 1, ctx_window), dtype=np.int64)
         all_actions = np.zeros((batch_size, W, data_action_dim), dtype=np.float32)
+        all_diffs = np.zeros((batch_size, W, ctx_window), dtype=np.int64) if diff_ds is not None else None
 
         for b, tid in enumerate(traj_ids):
             offset = int(traj_offsets[tid])
@@ -289,11 +298,16 @@ def main():
             all_states[b, :W] = befores
             all_states[b, W] = last_after
             all_actions[b] = actions
+            if all_diffs is not None:
+                all_diffs[b] = diff_ds[idx_range].astype(np.int64)
 
-        return {
+        batch = {
             "states": torch.from_numpy(all_states).to(device),
             "actions": torch.from_numpy(all_actions).to(device),
         }
+        if all_diffs is not None:
+            batch["diff_tokens"] = torch.from_numpy(all_diffs).to(device)
+        return batch
 
     def get_batch(split="train"):
         if has_trajectories:
