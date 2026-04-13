@@ -295,6 +295,8 @@ class WorldModelBase(CrucibleModel):
         delta_mode: bool = False,
         diff_vocab_size: int = 700,
         diff_encoder_loops: int = 4,
+        freeze_diff_encoder: bool = False,
+        predictor_dropout: float | None = None,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -321,6 +323,9 @@ class WorldModelBase(CrucibleModel):
         self.delta_mode = delta_mode
         self.diff_vocab_size = diff_vocab_size
         self.diff_encoder_loops = diff_encoder_loops
+        self.freeze_diff_encoder = freeze_diff_encoder
+        self.predictor_dropout = predictor_dropout
+        self._delta_logged = False
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
         self.scheduled_rollout = scheduled_rollout
@@ -358,15 +363,21 @@ class WorldModelBase(CrucibleModel):
                 mlp_ratio=self.mlp_ratio,
                 dropout=self.dropout_rate,
             )
+            if self.freeze_diff_encoder:
+                self.diff_encoder.requires_grad_(False)
+                self.diff_encoder.eval()  # PyTorch nn.Module.eval(), not Python eval()
+                n_params = sum(p.numel() for p in self.diff_encoder.parameters())
+                print(f"[WMBase] diff_encoder FROZEN ({n_params} params)")
 
         # Looped predictor
+        _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
         self.predictor = LoopedPredictor(
             dim=self.model_dim,
             num_heads=self.num_heads,
             depth=self.predictor_depth,
             num_loops=self.num_loops,
             mlp_ratio=self.mlp_ratio,
-            dropout=self.dropout_rate,
+            dropout=_pred_dropout,
         )
 
         # Prediction projector (BYOL/VICReg pattern):
@@ -390,6 +401,13 @@ class WorldModelBase(CrucibleModel):
 
         # Step counter for scheduled rollout / noise annealing
         self.register_buffer("_train_step", torch.tensor(0, dtype=torch.long))
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Keep frozen diff_encoder in eval regardless of model.train() calls
+        if self.freeze_diff_encoder and self.diff_encoder is not None:
+            self.diff_encoder.eval()  # PyTorch nn.Module.eval()
+        return self
 
     # ── Phase 6: Rollout robustness helpers ──
 
@@ -535,10 +553,19 @@ class WorldModelBase(CrucibleModel):
         diff_tokens = kwargs.get("diff_tokens")
         use_delta = self.delta_mode and diff_tokens is not None and self.diff_encoder is not None
 
+        if not self._delta_logged:
+            print(f"[WMBase] use_delta={use_delta} (delta_mode={self.delta_mode}, "
+                  f"diff_tokens={'present' if diff_tokens is not None else 'None'}, "
+                  f"diff_encoder={'built' if self.diff_encoder is not None else 'None'}, "
+                  f"frozen={self.freeze_diff_encoder})")
+            self._delta_logged = True
+
         if use_delta:
             diff_shape = diff_tokens.shape[2:]
             flat_diffs = diff_tokens[:, :num_transitions].reshape(B * num_transitions, *diff_shape)
             z_target = self.diff_encoder(flat_diffs).reshape(B, num_transitions, -1)  # [B, T-1, D]
+            if self.freeze_diff_encoder:
+                z_target = z_target.detach()
         else:
             with torch.no_grad():
                 flat_next_states = states[:, 1:].reshape(B * num_transitions, *state_shape)
@@ -901,4 +928,6 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "delta_mode": _get("delta_mode", "WM_DELTA_MODE", "0") == "1",
         "diff_vocab_size": int(_get("diff_vocab_size", "WM_DIFF_VOCAB_SIZE", "700")),
         "diff_encoder_loops": int(_get("diff_encoder_loops", "WM_DIFF_ENCODER_LOOPS", "4")),
+        "freeze_diff_encoder": _get("freeze_diff_encoder", "WM_FREEZE_DIFF_ENCODER", "0") == "1",
+        "predictor_dropout": float(_pd) if (_pd := _get("predictor_dropout", "WM_PREDICTOR_DROPOUT", "")) else None,
     }
