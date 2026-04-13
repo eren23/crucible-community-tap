@@ -26,13 +26,33 @@ Env vars (new, in addition to existing):
 """
 from __future__ import annotations
 
+import hashlib
 import math
 import os
+import subprocess
 import sys
 import time
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+
+
+def _git_sha(path: str) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=path, stderr=subprocess.DEVNULL,
+        ).decode().strip()[:12]
+    except Exception:
+        return "unknown"
+
+
+def _file_hash(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
 
 
 def main():
@@ -114,6 +134,24 @@ def main():
     action_dim = data_action_dim
     os.environ["ACTION_DIM"] = str(action_dim)
 
+    # Vocab validation: HDF5 metadata is authoritative
+    meta = f["metadata"]
+    data_vocab = int(meta.attrs.get("vocab_size", 662))
+    data_diff_vocab = int(meta.attrs.get("diff_vocab_size", 0))
+    effective_vocab = max(data_vocab, data_diff_vocab) if data_diff_vocab > 0 else data_vocab
+    if vocab_size < effective_vocab:
+        print(f"  WARNING: WM_VOCAB_SIZE={vocab_size} < data vocab {effective_vocab}, auto-correcting")
+        vocab_size = effective_vocab
+    if ctx_window > max_seq_len:
+        print(f"  ERROR: data ctx_window={ctx_window} > max_seq_len={max_seq_len}", file=sys.stderr)
+        sys.exit(1)
+
+    # Delta mode detection
+    has_diffs = bool(meta.attrs.get("has_diffs", False)) or "diff_tokens" in f
+    delta_mode = os.environ.get("WM_DELTA_MODE", "0") == "1"
+    freeze_diff = os.environ.get("WM_FREEZE_DIFF_ENCODER", "0") == "1"
+    pred_dropout = os.environ.get("WM_PREDICTOR_DROPOUT", "")
+
     # Auto-adjust window length
     if has_trajectories:
         traj_lengths = f["trajectory/traj_lengths"][:]
@@ -154,7 +192,18 @@ def main():
               f"max_prob={os.environ.get('WM_ROLLOUT_MAX_PROB', '0.5')}")
     if norm_project:
         print(f"  Norm proj:  enabled")
+    if delta_mode:
+        print(f"  Delta mode: ON (freeze={freeze_diff}, diff_vocab={data_diff_vocab}, has_diffs={has_diffs})")
+        if pred_dropout:
+            print(f"  Pred drop:  {pred_dropout}")
+        if not has_diffs:
+            print(f"  WARNING: delta_mode=1 but data has no diff_tokens! Will fall back to standard JEPA.")
+    print(f"  Vocab:      {vocab_size} (data={data_vocab}, diff={data_diff_vocab})")
     print(f"  Training:   {total_steps} steps, batch={batch_size}, lr={lr}")
+    tap_sha = _git_sha(tap_root)
+    data_hash = _file_hash(hdf5_path)
+    print(f"  Git SHA:    {tap_sha}")
+    print(f"  Data hash:  {data_hash}")
     print(f"  W&B:        {wandb_project}")
     print()
 
@@ -189,15 +238,26 @@ def main():
                 "action_dim": action_dim, "ema_decay": ema_decay,
                 "lr": lr, "batch_size": batch_size, "total_steps": total_steps,
                 "n_params": n_params, "data_file": os.path.basename(hdf5_path),
+                "data_hash": data_hash, "git_sha": tap_sha,
+                "seed": seed, "launcher": "code_wm/train_code_wm.py",
                 "num_edits": num_edits, "mode": mode, "window_len": window_len,
                 "bounded_residual": bounded_residual, "residual_scale": residual_scale,
                 "dir_loss_until": dir_loss_until, "dropout_ramp": dropout_ramp,
                 "ema_start": ema_start, "num_trajectories": num_trajectories,
                 "noise_sigma": noise_sigma, "scheduled_rollout": scheduled_rollout,
                 "norm_project": norm_project,
+                "delta_mode": delta_mode, "freeze_diff_encoder": freeze_diff,
+                "predictor_dropout": pred_dropout or "default",
+                "has_diffs": has_diffs,
             },
         )
         use_wandb = True
+        # Tags for filtering
+        wandb.run.tags = [f"seed-{seed}", f"dim-{model_dim}", mode]
+        if delta_mode:
+            wandb.run.tags.append("delta-mode")
+            if freeze_diff:
+                wandb.run.tags.append("frozen-encoder")
         print(f"W&B run: {wandb.run.url}")
     except Exception as e:
         print(f"W&B init failed ({e}), training without logging")
@@ -381,6 +441,18 @@ def main():
         loss_rollout = out.get("loss_rollout", torch.tensor(0.0)).item()
         loss_path = out.get("loss_path_consistency", torch.tensor(0.0)).item()
 
+        # Health checks
+        if math.isnan(loss_val) or math.isinf(loss_val):
+            print(f"FATAL: loss is {loss_val} at step {step}. Aborting.", file=sys.stderr)
+            if use_wandb:
+                wandb.run.summary["failure"] = "nan_loss"
+                wandb.finish(exit_code=1)
+            sys.exit(1)
+        if step > warmup_steps and loss_val > 50 * max(best_loss, 0.01):
+            print(f"WARNING: loss explosion ({loss_val:.4f} vs best {best_loss:.4f}) at step {step}")
+        if delta_cos > 0.999 and step > 500:
+            print(f"WARNING: possible memorization (dcos={delta_cos:.6f} at step {step})")
+
         if loss_val < best_loss:
             best_loss = loss_val
 
@@ -434,19 +506,37 @@ def main():
                 zt = eo["target_embeddings"][:, 0].reshape(-1, model_dim)
                 z_curr = model.state_encoder(eb["states"][:, 0]).reshape(-1, model_dim)
 
-                cos_sim = F.cosine_similarity(zp, zt, dim=-1).mean().item()
-                cos_copy = F.cosine_similarity(z_curr, zt, dim=-1).mean().item()
-                delta_true = zt - z_curr
-                delta_pred = zp - z_curr
-                dt_n = F.normalize(delta_true, dim=-1)
-                dp_n = F.normalize(delta_pred, dim=-1)
-                val_delta_cos = (dt_n * dp_n).sum(dim=-1).mean().item()
-                lift = cos_sim - cos_copy
+                # Delta-mode-aware eval: pred and target spaces differ
+                is_delta = hasattr(model, 'delta_mode') and model.delta_mode and "diff_tokens" in eb
+
+                if is_delta:
+                    # Delta mode: pred and target both in diff-encoder space
+                    # cos_sim = how well predictor matches diff_encoder output
+                    cos_sim = F.cosine_similarity(zp, zt, dim=-1).mean().item()
+                    # copy_cos is meaningless (state vs diff = cross-space)
+                    cos_copy = float('nan')
+                    lift = float('nan')
+                    # In delta mode, pred IS the delta — cos_sim is the metric
+                    val_delta_cos = cos_sim
+                    # For per-example table
+                    delta_true = zt  # target IS the delta
+                    delta_pred = zp  # pred IS the predicted delta
+                else:
+                    # Standard JEPA: both in state_encoder space
+                    cos_sim = F.cosine_similarity(zp, zt, dim=-1).mean().item()
+                    cos_copy = F.cosine_similarity(z_curr, zt, dim=-1).mean().item()
+                    delta_true = zt - z_curr
+                    delta_pred = zp - z_curr
+                    dt_n = F.normalize(delta_true, dim=-1)
+                    dp_n = F.normalize(delta_pred, dim=-1)
+                    val_delta_cos = (dt_n * dp_n).sum(dim=-1).mean().item()
+                    lift = cos_sim - cos_copy
 
                 # Multi-step metrics (if window > 1)
                 val_multistep = {}
                 n_pred_steps = eo["pred_embeddings"].shape[1]
-                if n_pred_steps > 1:
+                if n_pred_steps > 1 and not is_delta:
+                    # Multi-step only meaningful in standard JEPA mode
                     for k in range(min(n_pred_steps, 4)):
                         zp_k = eo["pred_embeddings"][:, k].reshape(-1, model_dim)
                         zt_k = eo["target_embeddings"][:, k].reshape(-1, model_dim)
@@ -459,53 +549,58 @@ def main():
                 if use_wandb:
                     val_log = {
                         "val/cosine_sim": cos_sim,
-                        "val/cos_copy_baseline": cos_copy,
-                        "val/lift_over_copy": lift,
                         "val/delta_cos_sim": val_delta_cos,
                         "val/pred_loss": eo.get("loss_pred", eo.get("pred_loss", torch.tensor(0.0))).item(),
+                        "val/is_delta_mode": 1 if is_delta else 0,
                     }
+                    if not is_delta:
+                        val_log["val/cos_copy_baseline"] = cos_copy
+                        val_log["val/lift_over_copy"] = lift
                     val_log.update(val_multistep)
 
                     # Per-example inference table (first N examples from val batch)
                     n_examples = min(10, zp.shape[0])
                     rows = []
                     for i in range(n_examples):
-                        # Per-example metrics
                         cos_i = F.cosine_similarity(zp[i:i+1], zt[i:i+1], dim=-1).item()
-                        copy_i = F.cosine_similarity(z_curr[i:i+1], zt[i:i+1], dim=-1).item()
                         dt_i = F.normalize(delta_true[i:i+1], dim=-1)
                         dp_i = F.normalize(delta_pred[i:i+1], dim=-1)
                         dcos_i = (dt_i * dp_i).sum(-1).item()
-                        # Token stats: how many tokens changed between before and after
+                        # Token stats
                         before_toks = eb["states"][i, 0].cpu()
                         after_toks = eb["states"][i, 1].cpu() if eb["states"].shape[1] > 1 else before_toks
                         n_tokens = int((before_toks > 0).sum())
                         n_changed = int((before_toks != after_toks).sum())
                         pct_changed = 100.0 * n_changed / max(n_tokens, 1)
-                        # Diff token stats (if available)
                         diff_info = ""
                         if "diff_tokens" in eb:
                             diff_toks = eb["diff_tokens"][i, 0].cpu() if eb["diff_tokens"].dim() > 2 else eb["diff_tokens"][i].cpu()
                             n_diff = int((diff_toks > 0).sum())
                             diff_info = f"{n_diff} tokens"
-                        rows.append({
+                        row = {
                             "idx": i,
                             "cosine": round(cos_i, 4),
-                            "copy_cos": round(copy_i, 4),
                             "delta_cos": round(dcos_i, 4),
-                            "lift": round(cos_i - copy_i, 4),
                             "tokens": n_tokens,
                             "changed": n_changed,
                             "pct_changed": round(pct_changed, 1),
                             "diff_tokens": diff_info,
-                        })
+                        }
+                        if not is_delta:
+                            copy_i = F.cosine_similarity(z_curr[i:i+1], zt[i:i+1], dim=-1).item()
+                            row["copy_cos"] = round(copy_i, 4)
+                            row["lift"] = round(cos_i - copy_i, 4)
+                        rows.append(row)
                     val_log["examples"] = wandb.Table(
                         columns=list(rows[0].keys()),
                         data=[list(r.values()) for r in rows],
                     )
                     wandb.log(val_log, step=step)
 
-                step_str = f"  val dcos={val_delta_cos:.4f} cos={cos_sim:.4f} (copy={cos_copy:.4f}, lift={lift:+.4f})"
+                if is_delta:
+                    step_str = f"  val dcos={val_delta_cos:.4f} cos={cos_sim:.4f} [DELTA MODE]"
+                else:
+                    step_str = f"  val dcos={val_delta_cos:.4f} cos={cos_sim:.4f} (copy={cos_copy:.4f}, lift={lift:+.4f})"
                 if val_multistep:
                     dcos_vals = [f"s{k+1}={v:.3f}" for k, v in enumerate(val_multistep.values())]
                     step_str += f" | multi-step: {' '.join(dcos_vals)}"
