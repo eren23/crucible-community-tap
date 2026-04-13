@@ -207,6 +207,9 @@ def main():
     print(f"  W&B:        {wandb_project}")
     print()
 
+    # ---- Seed (needed before W&B init for config logging) ----------------
+    seed = int(os.environ.get("WM_SEED", "42"))
+
     # ---- Build model ----------------------------------------------------
     kwargs = wm_base_kwargs_from_env(None)
     model = CodeWorldModel(
@@ -279,7 +282,6 @@ def main():
 
     # ---- Train/Val split ------------------------------------------------
     val_frac = float(os.environ.get("WM_VAL_FRAC", "0.1"))
-    seed = int(os.environ.get("WM_SEED", "42"))
     np.random.seed(seed)
     torch.manual_seed(seed)
 
