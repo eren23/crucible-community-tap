@@ -465,6 +465,44 @@ def main():
                         "val/pred_loss": eo.get("loss_pred", eo.get("pred_loss", torch.tensor(0.0))).item(),
                     }
                     val_log.update(val_multistep)
+
+                    # Per-example inference table (first N examples from val batch)
+                    n_examples = min(10, zp.shape[0])
+                    rows = []
+                    for i in range(n_examples):
+                        # Per-example metrics
+                        cos_i = F.cosine_similarity(zp[i:i+1], zt[i:i+1], dim=-1).item()
+                        copy_i = F.cosine_similarity(z_curr[i:i+1], zt[i:i+1], dim=-1).item()
+                        dt_i = F.normalize(delta_true[i:i+1], dim=-1)
+                        dp_i = F.normalize(delta_pred[i:i+1], dim=-1)
+                        dcos_i = (dt_i * dp_i).sum(-1).item()
+                        # Token stats: how many tokens changed between before and after
+                        before_toks = eb["states"][i, 0].cpu()
+                        after_toks = eb["states"][i, 1].cpu() if eb["states"].shape[1] > 1 else before_toks
+                        n_tokens = int((before_toks > 0).sum())
+                        n_changed = int((before_toks != after_toks).sum())
+                        pct_changed = 100.0 * n_changed / max(n_tokens, 1)
+                        # Diff token stats (if available)
+                        diff_info = ""
+                        if "diff_tokens" in eb:
+                            diff_toks = eb["diff_tokens"][i, 0].cpu() if eb["diff_tokens"].dim() > 2 else eb["diff_tokens"][i].cpu()
+                            n_diff = int((diff_toks > 0).sum())
+                            diff_info = f"{n_diff} tokens"
+                        rows.append({
+                            "idx": i,
+                            "cosine": round(cos_i, 4),
+                            "copy_cos": round(copy_i, 4),
+                            "delta_cos": round(dcos_i, 4),
+                            "lift": round(cos_i - copy_i, 4),
+                            "tokens": n_tokens,
+                            "changed": n_changed,
+                            "pct_changed": round(pct_changed, 1),
+                            "diff_tokens": diff_info,
+                        })
+                    val_log["examples"] = wandb.Table(
+                        columns=list(rows[0].keys()),
+                        data=[list(r.values()) for r in rows],
+                    )
                     wandb.log(val_log, step=step)
 
                 step_str = f"  val dcos={val_delta_cos:.4f} cos={cos_sim:.4f} (copy={cos_copy:.4f}, lift={lift:+.4f})"
