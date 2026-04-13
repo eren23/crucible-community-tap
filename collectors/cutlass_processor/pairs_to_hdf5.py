@@ -145,6 +145,53 @@ def encode_config(cfg: dict, seq_len: int = 512) -> np.ndarray:
     return np.array(tokens, dtype=np.int64)
 
 
+# ── Dense config encoding (no tokenization, direct float vectors) ──
+
+# Categorical field → list of known values (order = one-hot index)
+DENSE_CATEGORICALS = {
+    "arch": ["sm80", "sm90", "sm100"],
+    "kernel_type": ["gemm", "conv", "reduce"],
+    "element_a": ["f16", "bf16", "f32", "f64", "tf32", "f8e4m3", "f8e5m2", "i8"],
+    "element_b": ["f16", "bf16", "f32", "f64", "tf32", "f8e4m3", "f8e5m2", "i8"],
+    "layout_a": ["row", "col"],
+    "layout_b": ["row", "col"],
+    "mma_class": ["hmma", "wgmma", "tcgen05", "simt"],
+    "mainloop": ["cp_async", "tma", "tma_warp_specialized", "tcgen05"],
+}
+
+# Total one-hot dims: 3+3+8+8+2+2+4+4 = 34
+# Numerical dims: tile_m/n/k (3) + cluster_m/n/k (3) + stages (1) = 7
+# Total: 41
+DENSE_DIM = sum(len(v) for v in DENSE_CATEGORICALS.values()) + 7
+
+
+def encode_config_dense(cfg: dict) -> np.ndarray:
+    """Encode a kernel config as a dense float vector (one-hot + normalized numericals)."""
+    import math
+    parts = []
+
+    # One-hot categoricals
+    for field, values in DENSE_CATEGORICALS.items():
+        val = str(cfg.get(field, "unknown"))
+        one_hot = np.zeros(len(values), dtype=np.float32)
+        if val in values:
+            one_hot[values.index(val)] = 1.0
+        parts.append(one_hot)
+
+    # Normalized numericals
+    for field in ["tile_m", "tile_n", "tile_k"]:
+        val = cfg.get(field, 128)
+        parts.append(np.array([math.log2(max(val, 1)) / 8.0], dtype=np.float32))
+
+    for field in ["cluster_m", "cluster_n", "cluster_k"]:
+        val = cfg.get(field, 1)
+        parts.append(np.array([val / 4.0], dtype=np.float32))
+
+    parts.append(np.array([cfg.get("stages", 2) / 8.0], dtype=np.float32))
+
+    return np.concatenate(parts)
+
+
 def encode_action(action: dict) -> np.ndarray:
     """Encode migration action as 12D float vector."""
     keys = [
@@ -194,6 +241,8 @@ def main():
         N = len(split_pairs)
         before_tokens = np.zeros((N, args.seq_len), dtype=np.int64)
         after_tokens = np.zeros((N, args.seq_len), dtype=np.int64)
+        before_dense = np.zeros((N, DENSE_DIM), dtype=np.float32)
+        after_dense = np.zeros((N, DENSE_DIM), dtype=np.float32)
         edit_actions = np.zeros((N, 12), dtype=np.float32)
         source_arch = np.zeros(N, dtype=np.int32)
         target_arch = np.zeros(N, dtype=np.int32)
@@ -202,6 +251,8 @@ def main():
         for i, pair in enumerate(split_pairs):
             before_tokens[i] = encode_config(pair["before"], args.seq_len)
             after_tokens[i] = encode_config(pair["after"], args.seq_len)
+            before_dense[i] = encode_config_dense(pair["before"])
+            after_dense[i] = encode_config_dense(pair["after"])
             edit_actions[i] = encode_action(pair["action"])
             source_arch[i] = ARCH_MAP.get(pair["before"]["arch"], 0)
             target_arch[i] = ARCH_MAP.get(pair["after"]["arch"], 0)
@@ -212,6 +263,8 @@ def main():
         with h5py.File(out_path, "w") as f:
             f.create_dataset("before_tokens", data=before_tokens, compression="gzip")
             f.create_dataset("after_tokens", data=after_tokens, compression="gzip")
+            f.create_dataset("before_dense", data=before_dense, compression="gzip")
+            f.create_dataset("after_dense", data=after_dense, compression="gzip")
             f.create_dataset("edit_actions", data=edit_actions, compression="gzip")
             f.create_dataset("source_arch", data=source_arch)
             f.create_dataset("target_arch", data=target_arch)
@@ -226,6 +279,7 @@ def main():
             meta.attrs["split"] = split_name
             meta.attrs["holdout_migration"] = args.holdout_migration
             meta.attrs["vocab_size"] = 400  # PAD..399
+            meta.attrs["dense_dim"] = DENSE_DIM
 
         size_mb = Path(out_path).stat().st_size / 1024 / 1024
         print(f"  {split_name}: {N} pairs -> {out_path} ({size_mb:.1f} MB)")

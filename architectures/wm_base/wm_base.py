@@ -162,6 +162,84 @@ class LoopedPredictor(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# DiffEncoder — bottleneck encoder for code diffs (DeltaTok-inspired)
+# ---------------------------------------------------------------------------
+
+class DiffEncoder(nn.Module):
+    """Bottleneck encoder that compresses diff tokens into a single delta vector.
+
+    Inspired by DeltaTok (CVPR 2026): a learnable z_token attends to the diff
+    token sequence, then only the z_token is extracted. This forces the output
+    to encode ONLY the change, not the full state.
+
+    Architecture:
+        diff_tokens [B, S] -> embedding [B, S, D]
+        prepend z_token -> [B, S+1, D]
+        LoopedTransformerBlock x num_loops
+        extract z_token at position 0 -> [B, D]
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 700,
+        dim: int = 128,
+        num_heads: int = 4,
+        num_loops: int = 4,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        max_seq_len: int = 512,
+    ):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, dim)
+        self.pos_enc = nn.Embedding(max_seq_len + 1, dim)  # +1 for z_token
+        self.z_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        self.block = LoopedTransformerBlock(dim, num_heads, mlp_ratio, dropout)
+        self.num_loops = num_loops
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, diff_tokens: Tensor) -> Tensor:
+        """Encode diff tokens to a single delta vector.
+
+        Args:
+            diff_tokens: [B, S] int64 — tokenized unified diff
+
+        Returns:
+            [B, D] — delta embedding (the change vector)
+        """
+        B, S = diff_tokens.shape
+        h = self.embedding(diff_tokens)  # [B, S, D]
+        # Positional encoding
+        positions = torch.arange(S, device=diff_tokens.device)
+        h = h + self.pos_enc(positions + 1)  # +1 to reserve 0 for z_token
+        # Prepend learnable bottleneck z_token
+        z = self.z_token.expand(B, -1, -1) + self.pos_enc(torch.zeros(1, dtype=torch.long, device=diff_tokens.device))
+        h = torch.cat([z, h], dim=1)  # [B, S+1, D]
+        # Looped transformer
+        for _ in range(self.num_loops):
+            h = self.block(h)
+        # Extract z_token (position 0) — this IS the delta
+        return self.norm(h[:, 0])  # [B, D]
+
+
+# ---------------------------------------------------------------------------
+# LogCosh loss (from DeltaTok — smooth near 0, robust to outliers)
+# ---------------------------------------------------------------------------
+
+def logcosh_loss(pred: Tensor, target: Tensor) -> Tensor:
+    """LogCosh loss: smooth L2 near zero, L1 for large values.
+
+    From DeltaTok (CVPR 2026): handles small deltas gracefully (smooth gradient
+    near zero unlike L1), while being robust to large deltas (unlike L2 which
+    squares the error).
+
+    Formula: mean(|x| + softplus(-2|x|) - log(2))
+    """
+    diff = pred - target
+    abs_diff = diff.abs()
+    return (abs_diff + F.softplus(-2.0 * abs_diff) - math.log(2.0)).mean()
+
+
+# ---------------------------------------------------------------------------
 # WorldModelBase
 # ---------------------------------------------------------------------------
 
@@ -213,6 +291,10 @@ class WorldModelBase(CrucibleModel):
         rollout_warmup_steps: int = 2000,
         rollout_max_prob: float = 0.5,
         norm_project: bool = False,
+        # ── Delta-native mode (Phase 7, DeltaTok-inspired) ──
+        delta_mode: bool = False,
+        diff_vocab_size: int = 700,
+        diff_encoder_loops: int = 4,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -236,6 +318,9 @@ class WorldModelBase(CrucibleModel):
         self.contrast_temperature = contrast_temperature
         self.contrast_pos_threshold = contrast_pos_threshold
         # Phase 6: rollout robustness
+        self.delta_mode = delta_mode
+        self.diff_vocab_size = diff_vocab_size
+        self.diff_encoder_loops = diff_encoder_loops
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
         self.scheduled_rollout = scheduled_rollout
@@ -257,9 +342,22 @@ class WorldModelBase(CrucibleModel):
         self.action_encoder = action_encoder
 
         # EMA target encoder: deep copy of state_encoder, frozen
+        # In delta_mode, target comes from diff_encoder instead — EMA is optional
         self.target_encoder = copy.deepcopy(state_encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad = False
+
+        # Delta-native mode: build diff encoder for encoding code diffs
+        self.diff_encoder: nn.Module | None = None
+        if self.delta_mode:
+            self.diff_encoder = DiffEncoder(
+                vocab_size=self.diff_vocab_size,
+                dim=self.model_dim,
+                num_heads=self.num_heads,
+                num_loops=self.diff_encoder_loops,
+                mlp_ratio=self.mlp_ratio,
+                dropout=self.dropout_rate,
+            )
 
         # Looped predictor
         self.predictor = LoopedPredictor(
@@ -431,10 +529,20 @@ class WorldModelBase(CrucibleModel):
         flat_actions = actions.reshape(B * num_transitions, *action_shape)
         z_action = self.action_encoder(flat_actions).reshape(B, num_transitions, -1)  # [B, T-1, D]
 
-        # Compute target embeddings via EMA encoder (no gradient)
-        with torch.no_grad():
-            flat_next_states = states[:, 1:].reshape(B * num_transitions, *state_shape)
-            z_target = self.target_encoder(flat_next_states).reshape(B, num_transitions, -1)  # [B, T-1, D]
+        # Compute target embeddings
+        # Delta mode: target = diff_encoder(diff_tokens) — encodes the CHANGE
+        # Standard mode: target = EMA encoder(next_states) — encodes the state
+        diff_tokens = kwargs.get("diff_tokens")
+        use_delta = self.delta_mode and diff_tokens is not None and self.diff_encoder is not None
+
+        if use_delta:
+            diff_shape = diff_tokens.shape[2:]
+            flat_diffs = diff_tokens[:, :num_transitions].reshape(B * num_transitions, *diff_shape)
+            z_target = self.diff_encoder(flat_diffs).reshape(B, num_transitions, -1)  # [B, T-1, D]
+        else:
+            with torch.no_grad():
+                flat_next_states = states[:, 1:].reshape(B * num_transitions, *state_shape)
+                z_target = self.target_encoder(flat_next_states).reshape(B, num_transitions, -1)  # [B, T-1, D]
 
         # Predict next-state embeddings for each transition
         # Phase 6: optionally inject noise and/or use scheduled rollout
@@ -475,30 +583,35 @@ class WorldModelBase(CrucibleModel):
         pred_embeddings = torch.stack(pred_list, dim=1)  # [B, T-1, D]
 
         # ─── Loss A: Prediction loss ───
-        # WM_USE_PROJECTOR=0 disables projectors — MSE on raw normalized embeddings.
-        # With v2 delta losses providing direct geometric supervision, the projector
-        # may sabotage by absorbing alignment gradient.
         pred_flat = pred_embeddings.reshape(-1, self.model_dim)
         target_flat = z_target.reshape(-1, self.model_dim)
-        use_projector = os.environ.get("WM_USE_PROJECTOR", "1") == "1"
-        if use_projector:
-            loss_pred = F.mse_loss(
-                F.normalize(self.pred_projector(pred_flat), dim=-1),
-                F.normalize(self.target_projector(target_flat), dim=-1),
-            )
-        else:
-            # Direct MSE on L2-normalized raw embeddings
-            loss_pred = F.mse_loss(
-                F.normalize(pred_flat, dim=-1),
-                F.normalize(target_flat, dim=-1),
-            )
 
-        # ─── Delta-space losses (v2: transition geometry) ───
-        # The edit displacement field should be smooth, calibrated, and
-        # direction-aligned — this is the code-native geometry prior.
-        z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
-        delta_true = target_flat - z_current    # actual edit displacement
-        delta_pred = pred_flat - z_current      # predicted edit displacement
+        if use_delta:
+            # Delta mode: target IS the delta (from diff_encoder), predictor predicts delta
+            # Use LogCosh loss (DeltaTok) — smooth near 0, robust to outliers
+            loss_pred = logcosh_loss(pred_flat, target_flat)
+            # In delta mode, pred_flat IS the predicted delta (not a state)
+            # and target_flat IS the true delta (from diff_encoder)
+            delta_true = target_flat
+            delta_pred = pred_flat
+            z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)
+        else:
+            # Standard mode: MSE on normalized embeddings
+            use_projector = os.environ.get("WM_USE_PROJECTOR", "1") == "1"
+            if use_projector:
+                loss_pred = F.mse_loss(
+                    F.normalize(self.pred_projector(pred_flat), dim=-1),
+                    F.normalize(self.target_projector(target_flat), dim=-1),
+                )
+            else:
+                loss_pred = F.mse_loss(
+                    F.normalize(pred_flat, dim=-1),
+                    F.normalize(target_flat, dim=-1),
+                )
+            # Delta-space losses (v2: transition geometry)
+            z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
+            delta_true = target_flat - z_current    # actual edit displacement
+            delta_pred = pred_flat - z_current      # predicted edit displacement
 
         # Loss B: Delta direction alignment
         # "Predicted edit should point same direction as true edit"
@@ -784,4 +897,8 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "rollout_warmup_steps": int(_get("rollout_warmup_steps", "WM_ROLLOUT_WARMUP", "2000")),
         "rollout_max_prob": float(_get("rollout_max_prob", "WM_ROLLOUT_MAX_PROB", "0.5")),
         "norm_project": _get("norm_project", "WM_NORM_PROJECT", "0") == "1",
+        # Delta-native mode (Phase 7, DeltaTok-inspired)
+        "delta_mode": _get("delta_mode", "WM_DELTA_MODE", "0") == "1",
+        "diff_vocab_size": int(_get("diff_vocab_size", "WM_DIFF_VOCAB_SIZE", "700")),
+        "diff_encoder_loops": int(_get("diff_encoder_loops", "WM_DIFF_ENCODER_LOOPS", "4")),
     }

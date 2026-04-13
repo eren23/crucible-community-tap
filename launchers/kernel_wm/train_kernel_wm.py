@@ -232,6 +232,7 @@ def main():
     wandb_run_name = os.environ.get("WANDB_RUN_NAME", "")
     seed = int(os.environ.get("WM_SEED", "42"))
 
+    dense_mode = os.environ.get("KWM_DENSE", "0") == "1"
     os.environ["ACTION_DIM"] = str(action_dim)
     os.environ["WM_POOL_MODE"] = os.environ.get("WM_POOL_MODE", "attn")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -240,13 +241,25 @@ def main():
     tap_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.path.insert(0, tap_root)
 
-    from architectures.code_wm.code_wm import CodeWorldModel
     from architectures.wm_base.wm_base import wm_base_kwargs_from_env
+    if dense_mode:
+        from architectures.kernel_wm.kernel_wm import KernelWorldModel, kernel_wm_kwargs_from_env
+    else:
+        from architectures.code_wm.code_wm import CodeWorldModel
 
     import h5py
     f = h5py.File(hdf5_path, "r")
-    num_pairs = f["before_tokens"].shape[0]
-    ctx_window = f["before_tokens"].shape[1]
+    has_dense = "before_dense" in f
+    if dense_mode and not has_dense:
+        print("ERROR: KWM_DENSE=1 but HDF5 has no before_dense field. Rebuild with pairs_to_hdf5.py.", file=sys.stderr)
+        sys.exit(1)
+    if dense_mode:
+        num_pairs = f["before_dense"].shape[0]
+        input_dim = f["before_dense"].shape[1]
+        ctx_window = input_dim
+    else:
+        num_pairs = f["before_tokens"].shape[0]
+        ctx_window = f["before_tokens"].shape[1]
     data_action_dim = f["edit_actions"].shape[1]
     action_dim = data_action_dim
     os.environ["ACTION_DIM"] = str(action_dim)
@@ -261,19 +274,28 @@ def main():
     train_indices = np.sort(all_idx[n_val:])
 
     print("=== KernelWM Training ===")
-    print(f"  Data:     {hdf5_path} ({num_pairs:,} pairs, ctx={ctx_window}, action_dim={action_dim})")
+    print(f"  Data:     {hdf5_path} ({num_pairs:,} pairs, action_dim={action_dim})")
+    if dense_mode:
+        print(f"  Mode:     DENSE (input_dim={input_dim})")
+    else:
+        print(f"  Mode:     TOKEN (ctx={ctx_window}, vocab={vocab_size})")
     print(f"  Split:    {len(train_indices):,} train, {len(val_indices):,} val")
-    print(f"  Model:    dim={model_dim}, loops={num_loops}, heads={num_heads}, vocab={vocab_size}")
+    print(f"  Model:    dim={model_dim}, loops={num_loops}, heads={num_heads}")
     print(f"  Training: {total_steps} steps, batch={batch_size}, lr={lr}")
     print(f"  Examples: {n_examples} per eval -> {example_dir}")
     print(f"  Device:   {device}")
     print()
 
-    kwargs = wm_base_kwargs_from_env(None)
-    model = CodeWorldModel(
-        vocab_size=vocab_size, max_seq_len=max_seq_len,
-        encoder_loops=encoder_loops, **kwargs,
-    ).to(device)
+    if dense_mode:
+        kwargs = kernel_wm_kwargs_from_env()
+        kwargs["input_dim"] = input_dim
+        model = KernelWorldModel(**kwargs).to(device)
+    else:
+        kwargs = wm_base_kwargs_from_env(None)
+        model = CodeWorldModel(
+            vocab_size=vocab_size, max_seq_len=max_seq_len,
+            encoder_loops=encoder_loops, **kwargs,
+        ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {n_params:,} params")
 
@@ -304,20 +326,35 @@ def main():
         optimizer, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_steps],
     )
 
-    before_ds = f["before_tokens"]
-    after_ds = f["after_tokens"]
-    action_ds = f["edit_actions"]
+    # Preload ALL data into numpy for fast random access (736x vs HDF5 random reads)
+    print("  Preloading data into memory...", end=" ", flush=True)
+    action_np = f["edit_actions"][:].astype(np.float32)
+    if dense_mode:
+        before_np = f["before_dense"][:].astype(np.float32)
+        after_np = f["after_dense"][:].astype(np.float32)
+    else:
+        before_np = f["before_tokens"][:].astype(np.int64)
+        after_np = f["after_tokens"][:].astype(np.int64)
+    diff_np = f["diff_tokens"][:].astype(np.int64) if "diff_tokens" in f else None
+    total_mb = (before_np.nbytes + after_np.nbytes + action_np.nbytes) / 1024 / 1024
+    if diff_np is not None:
+        total_mb += diff_np.nbytes / 1024 / 1024
+    print(f"{total_mb:.0f} MB loaded")
+    f.close()  # HDF5 no longer needed
 
     def get_batch(pool_indices):
-        chosen = np.random.choice(pool_indices, size=min(batch_size, len(pool_indices)), replace=False)
-        idx = np.sort(chosen)
-        before = torch.from_numpy(before_ds[idx.tolist()].astype(np.int64)).to(device)
-        after = torch.from_numpy(after_ds[idx.tolist()].astype(np.int64)).to(device)
-        actions = torch.from_numpy(action_ds[idx.tolist()].astype(np.float32)).to(device)
-        return {
+        idx = np.random.choice(pool_indices, size=min(batch_size, len(pool_indices)), replace=False)
+        before = torch.from_numpy(before_np[idx]).to(device)
+        after = torch.from_numpy(after_np[idx]).to(device)
+        actions = torch.from_numpy(action_np[idx]).to(device)
+        batch = {
             "states": torch.stack([before, after], dim=1),
             "actions": actions.unsqueeze(1),
         }
+        if diff_np is not None:
+            batch["diff_tokens"] = torch.from_numpy(diff_np[idx].astype(np.int64)).to(device).unsqueeze(1)
+        batch["_indices"] = idx
+        return batch
 
     model.train()
     start_time = time.time()
@@ -326,7 +363,8 @@ def main():
     for step in range(total_steps):
         batch = get_batch(train_indices)
         optimizer.zero_grad()
-        out = model.forward(**batch)
+        fwd_args = {k: v for k, v in batch.items() if not k.startswith("_")}
+        out = model.forward(**fwd_args)
         out["loss"].backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
         optimizer.step()
@@ -345,7 +383,8 @@ def main():
             model.train(False)
             with torch.no_grad():
                 vb = get_batch(val_indices)
-                vo = model.forward(**vb)
+                vb_fwd = {k: v for k, v in vb.items() if not k.startswith("_")}
+                vo = model.forward(**vb_fwd)
                 zp = vo["pred_embeddings"][:, 0].reshape(-1, model_dim)
                 zt = vo["target_embeddings"][:, 0].reshape(-1, model_dim)
                 z_curr = model.state_encoder(vb["states"][:, 0]).reshape(-1, model_dim)
@@ -379,7 +418,8 @@ def main():
                     "model_state_dict": model.state_dict(),
                     "step": step, "val_delta_cos": val_dcos,
                     "config": {"model_dim": model_dim, "num_loops": num_loops,
-                               "vocab_size": vocab_size, "action_dim": action_dim},
+                               "vocab_size": vocab_size, "action_dim": action_dim,
+                               "dense": dense_mode, "input_dim": input_dim if dense_mode else 0},
                 }, os.path.join(output_dir, "kernel_wm_best.pt"))
 
             if use_wandb:
