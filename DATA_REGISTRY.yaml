@@ -1,0 +1,96 @@
+# Canonical data files for CodeWM / KernelWM training.
+# Anything in data/ not listed here is experimental or deprecated.
+# Launchers print registry status at startup when this file exists.
+
+files:
+  commitpackft_with_diffs.h5:
+    version: "1.0"
+    created: "2026-04-13"
+    source: bigcode/commitpackft
+    samples: 50000
+    vocab_size: 662
+    diff_vocab_size: 700
+    action_dim: 15
+    has_diffs: true
+    has_trajectories: false
+    hf_repo: eren23/codewm-data
+    hf_path: delta/commitpackft_with_diffs.h5
+    status: active
+    notes: "Python commits with AST tokens + unified diff tokens + 15D rich actions"
+
+  commitpackft_python_ast.h5:
+    version: "1.0"
+    created: "2026-04-04"
+    source: bigcode/commitpackft
+    samples: 56025
+    vocab_size: 662
+    action_dim: 7
+    has_diffs: false
+    has_trajectories: false
+    status: active
+    notes: "Python commits with AST tokens + 7D basic actions"
+
+  commitpackft_python_ast_rich.h5:
+    version: "1.0"
+    created: "2026-04-04"
+    source: bigcode/commitpackft
+    samples: 56025
+    vocab_size: 662
+    action_dim: 15
+    has_diffs: false
+    has_trajectories: false
+    status: active
+    notes: "Python commits with AST tokens + 15D rich actions (no diff tokens)"
+
+  commitpack_python_trajectories_1.5m.h5:
+    version: "1.0"
+    created: "2026-04-08"
+    source: bigcode/commitpack
+    samples: 16941  # trajectories
+    vocab_size: 662
+    action_dim: 7
+    has_diffs: false
+    has_trajectories: true
+    hf_repo: eren23/codewm-data
+    hf_path: trajectories/commitpack_python_trajectories_1.5m.h5
+    status: active
+    notes: "Chained trajectories from 1.5M CommitPack via token-hash matching"
+
+  # KernelWM data
+  kernel_pairs_v2_train.h5:
+    version: "2.0"
+    created: "2026-04-12"
+    source: NVIDIA/cutlass
+    samples: 13458
+    vocab_size: 400
+    action_dim: 12
+    has_diffs: false
+    has_trajectories: false
+    hf_repo: eren23/codewm-data
+    hf_path: kernelwm/kernel_pairs_v2_train.h5
+    status: active
+    notes: "CUTLASS SM80-SM90 + SM90-SM100 kernel config pairs (token encoded)"
+
+  kernel_pairs_v3_train.h5:
+    version: "3.0"
+    created: "2026-04-12"
+    source: NVIDIA/cutlass
+    samples: 13458
+    vocab_size: 400
+    action_dim: 12
+    has_diffs: false
+    has_trajectories: false
+    hf_repo: eren23/codewm-data
+    hf_path: kernelwm/kernel_pairs_v3_train.h5
+    status: active
+    notes: "v3 adds 41D dense config vectors (one-hot categoricals + normalized numericals)"
+
+# Deprecated / experimental (not canonical, may be deleted)
+deprecated:
+  - commitpack_python_1.5m.h5        # Raw 1.5M, superseded by trajectories
+  - commitpack_python_500k.h5        # Intermediate, superseded
+  - commitpack_python_balanced.h5    # Experiment, not used
+  - commitpack_python_quality.h5     # Experiment, not used
+  - trajectories_500k.h5             # Small test, superseded
+  - trajectories_quality_563k.h5     # Small test, superseded
+  - commitpackft_python_dfs.h5       # DFS variant, abandoned
