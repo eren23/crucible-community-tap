@@ -206,14 +206,27 @@ class CodeStateEncoder(nn.Module):
 
         self.norm = nn.LayerNorm(model_dim)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def _readout(self, h: Tensor) -> Tensor:
+        """Apply pooling + norm to sequence tensor. h: [B, S+1, D] -> [B, D]."""
+        if self.pool_mode == "cls":
+            h = h[:, 0]
+        elif self.pool_mode == "attn":
+            h = self.attn_pool(h)
+        else:
+            h = h.mean(dim=1)
+        return self.norm(h)
+
+    def forward(self, x: Tensor, return_intermediates: bool = False) -> Tensor | tuple[Tensor, list[Tensor]]:
         """Encode token IDs to latent vector.
 
         Args:
             x: [B, seq_len] long tensor of token IDs
+            return_intermediates: if True, also return pooled output
+                after each loop iteration (for multi-layer readout).
 
         Returns:
-            [B, model_dim] latent embedding
+            [B, model_dim] latent embedding (standard mode), or
+            tuple of (final_embedding, [loop_1_emb, ..., loop_N_emb])
         """
         B = x.shape[0]
 
@@ -223,21 +236,19 @@ class CodeStateEncoder(nn.Module):
         h = torch.cat([cls, h], dim=1)                      # [B, S+1, D]
         h = self.pos_enc(h)                                 # [B, S+1, D]
 
+        intermediates = [] if return_intermediates else None
+
         # Looped transformer passes (weight-shared)
         for _ in range(self.encoder_loops):
             h = self.block(h)                               # [B, S+1, D]
+            if return_intermediates:
+                intermediates.append(self._readout(h))
 
-        # Readout
-        if self.pool_mode == "cls":
-            h = h[:, 0]                                     # [B, D] — CLS token
-        elif self.pool_mode == "attn":
-            h = self.attn_pool(h)                           # [B, D] — attention readout
-        else:
-            h = h.mean(dim=1)                               # [B, D] — mean pool (legacy)
+        final = self._readout(h)                            # [B, D]
 
-        # Final normalization
-        h = self.norm(h)                                    # [B, D]
-        return h
+        if return_intermediates:
+            return final, intermediates
+        return final
 
 
 # ---------------------------------------------------------------------------

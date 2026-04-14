@@ -192,6 +192,13 @@ def main():
               f"max_prob={os.environ.get('WM_ROLLOUT_MAX_PROB', '0.5')}")
     if norm_project:
         print(f"  Norm proj:  enabled")
+    delta_statespace = os.environ.get("WM_DELTA_STATESPACE", "0") == "1"
+    early_readout = os.environ.get("WM_EARLY_READOUT", "0") == "1"
+    early_readout_loops = os.environ.get("WM_EARLY_READOUT_LOOPS", "1,2,3")
+    if delta_statespace:
+        print(f"  Delta SS:   ON (state-space delta prediction)")
+    if early_readout:
+        print(f"  Early read: ON (loops={early_readout_loops})")
     if delta_mode:
         print(f"  Delta mode: ON (freeze={freeze_diff}, diff_vocab={data_diff_vocab}, has_diffs={has_diffs})")
         if pred_dropout:
@@ -252,6 +259,9 @@ def main():
                 "delta_mode": delta_mode, "freeze_diff_encoder": freeze_diff,
                 "predictor_dropout": pred_dropout or "default",
                 "has_diffs": has_diffs,
+                "delta_statespace": delta_statespace,
+                "early_readout": early_readout,
+                "early_readout_loops": early_readout_loops,
             },
         )
         use_wandb = True
@@ -261,6 +271,10 @@ def main():
             wandb.run.tags.append("delta-mode")
             if freeze_diff:
                 wandb.run.tags.append("frozen-encoder")
+        if delta_statespace:
+            wandb.run.tags.append("delta-statespace")
+        if early_readout:
+            wandb.run.tags.append(f"early-readout-{early_readout_loops}")
         print(f"W&B run: {wandb.run.url}")
     except Exception as e:
         print(f"W&B init failed ({e}), training without logging")

@@ -240,6 +240,37 @@ def logcosh_loss(pred: Tensor, target: Tensor) -> Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Early Layer Fusion (Phase 8 — geometry-informed readout)
+# ---------------------------------------------------------------------------
+
+class EarlyLayerFusion(nn.Module):
+    """Fuse encoder intermediate outputs via learnable scalar weights.
+
+    Phase 0 showed early loop iterations have 12x more delta signal than
+    the final output. This module selects specific loop outputs and
+    computes a weighted sum with learned (softmax-normalized) scalars.
+
+    Args:
+        num_layers: number of loop iterations to fuse
+        dim: embedding dimension (for optional LayerNorm)
+    """
+
+    def __init__(self, num_layers: int, dim: int):
+        super().__init__()
+        # Raw logits; softmax at forward time so weights sum to 1
+        self.weight_logits = nn.Parameter(torch.zeros(num_layers))
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, intermediates: list[Tensor]) -> Tensor:
+        """Fuse a list of [B, D] tensors into a single [B, D] output."""
+        weights = torch.softmax(self.weight_logits, dim=0)
+        fused = torch.zeros_like(intermediates[0])
+        for w, z in zip(weights, intermediates):
+            fused = fused + w * z
+        return self.norm(fused)
+
+
+# ---------------------------------------------------------------------------
 # WorldModelBase
 # ---------------------------------------------------------------------------
 
@@ -297,6 +328,15 @@ class WorldModelBase(CrucibleModel):
         diff_encoder_loops: int = 4,
         freeze_diff_encoder: bool = False,
         predictor_dropout: float | None = None,
+        # ── Early-layer readout (Phase 8, geometry-informed) ──
+        # Read from early loop iterations where delta signal is 12x stronger.
+        # When enabled, encoder must support return_intermediates=True.
+        early_readout: bool = False,
+        early_readout_loops: tuple[int, ...] = (1, 2, 3),  # 1-indexed loop iterations
+        # ── State-space delta prediction (Phase 8) ──
+        # Predict target_encoder(x_{t+1}) - target_encoder(x_t) directly.
+        # Different from delta_mode which uses a separate diff_encoder.
+        delta_statespace: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -325,6 +365,9 @@ class WorldModelBase(CrucibleModel):
         self.diff_encoder_loops = diff_encoder_loops
         self.freeze_diff_encoder = freeze_diff_encoder
         self.predictor_dropout = predictor_dropout
+        self.early_readout = early_readout
+        self.early_readout_loops = early_readout_loops
+        self.delta_statespace = delta_statespace
         self._delta_logged = False
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
@@ -368,6 +411,15 @@ class WorldModelBase(CrucibleModel):
                 self.diff_encoder.eval()  # PyTorch nn.Module.eval(), not Python eval()
                 n_params = sum(p.numel() for p in self.diff_encoder.parameters())
                 print(f"[WMBase] diff_encoder FROZEN ({n_params} params)")
+
+        # Early-layer fusion (Phase 8)
+        self.layer_fusion: EarlyLayerFusion | None = None
+        if self.early_readout:
+            self.layer_fusion = EarlyLayerFusion(
+                num_layers=len(self.early_readout_loops),
+                dim=self.model_dim,
+            )
+            print(f"[WMBase] early_readout ENABLED: loops={self.early_readout_loops}")
 
         # Looped predictor
         _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
@@ -540,7 +592,16 @@ class WorldModelBase(CrucibleModel):
         # Flatten temporal dim for encoding, then reshape back
         state_shape = states.shape[2:]
         flat_states = states.reshape(B * T, *state_shape)
-        z_all = self.state_encoder(flat_states).reshape(B, T, -1)  # [B, T, D]
+
+        # Early-layer readout: extract intermediates from encoder loop iterations
+        if self.early_readout and self.layer_fusion is not None:
+            result = self.state_encoder(flat_states, return_intermediates=True)
+            z_final, intermediates = result
+            # Select requested loop iterations (1-indexed -> 0-indexed)
+            selected = [intermediates[i - 1] for i in self.early_readout_loops]
+            z_all = self.layer_fusion(selected).reshape(B, T, -1)  # [B, T, D]
+        else:
+            z_all = self.state_encoder(flat_states).reshape(B, T, -1)  # [B, T, D]
 
         # Encode actions
         action_shape = actions.shape[2:]
@@ -548,8 +609,9 @@ class WorldModelBase(CrucibleModel):
         z_action = self.action_encoder(flat_actions).reshape(B, num_transitions, -1)  # [B, T-1, D]
 
         # Compute target embeddings
-        # Delta mode: target = diff_encoder(diff_tokens) — encodes the CHANGE
-        # Standard mode: target = EMA encoder(next_states) — encodes the state
+        # State-space delta mode: target = target_enc(next) - target_enc(current)
+        # Delta mode: target = diff_encoder(diff_tokens)
+        # Standard mode: target = EMA encoder(next_states)
         diff_tokens = kwargs.get("diff_tokens")
         use_delta = self.delta_mode and diff_tokens is not None and self.diff_encoder is not None
 
@@ -557,7 +619,9 @@ class WorldModelBase(CrucibleModel):
             print(f"[WMBase] use_delta={use_delta} (delta_mode={self.delta_mode}, "
                   f"diff_tokens={'present' if diff_tokens is not None else 'None'}, "
                   f"diff_encoder={'built' if self.diff_encoder is not None else 'None'}, "
-                  f"frozen={self.freeze_diff_encoder})")
+                  f"frozen={self.freeze_diff_encoder}), "
+                  f"delta_statespace={self.delta_statespace}, "
+                  f"early_readout={self.early_readout}")
             self._delta_logged = True
 
         if use_delta:
@@ -569,7 +633,14 @@ class WorldModelBase(CrucibleModel):
         else:
             with torch.no_grad():
                 flat_next_states = states[:, 1:].reshape(B * num_transitions, *state_shape)
-                z_target = self.target_encoder(flat_next_states).reshape(B, num_transitions, -1)  # [B, T-1, D]
+                if self.early_readout and self.layer_fusion is not None:
+                    # Target also uses early-layer fusion (same loop iterations)
+                    tgt_result = self.target_encoder(flat_next_states, return_intermediates=True)
+                    _, tgt_intermediates = tgt_result
+                    tgt_selected = [tgt_intermediates[i - 1] for i in self.early_readout_loops]
+                    z_target = self.layer_fusion(tgt_selected).reshape(B, num_transitions, -1)
+                else:
+                    z_target = self.target_encoder(flat_next_states).reshape(B, num_transitions, -1)  # [B, T-1, D]
 
         # Predict next-state embeddings for each transition
         # Phase 6: optionally inject noise and/or use scheduled rollout
@@ -613,15 +684,31 @@ class WorldModelBase(CrucibleModel):
         pred_flat = pred_embeddings.reshape(-1, self.model_dim)
         target_flat = z_target.reshape(-1, self.model_dim)
 
-        if use_delta:
-            # Delta mode: target IS the delta (from diff_encoder), predictor predicts delta
-            # Use LogCosh loss (DeltaTok) — smooth near 0, robust to outliers
+        z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
+
+        if self.delta_statespace:
+            # State-space delta mode (Phase 8): predict z_{t+1} - z_t directly
+            # Target is the actual state-space delta from the target encoder
+            # Predictor output IS the predicted delta
+            with torch.no_grad():
+                z_current_target = z_target.reshape(-1, self.model_dim)  # target_enc(x_{t+1})
+                # z_current_target_prev: target_enc(x_t) for delta computation
+                flat_current_states = states[:, :-1].reshape(B * num_transitions, *state_shape)
+                if self.early_readout and self.layer_fusion is not None:
+                    cur_result = self.target_encoder(flat_current_states, return_intermediates=True)
+                    _, cur_intermediates = cur_result
+                    cur_selected = [cur_intermediates[i - 1] for i in self.early_readout_loops]
+                    z_current_target_prev = self.layer_fusion(cur_selected)
+                else:
+                    z_current_target_prev = self.target_encoder(flat_current_states)
+            delta_true = z_current_target.reshape(-1, self.model_dim) - z_current_target_prev.detach()
+            delta_pred = pred_flat  # predictor directly outputs delta
+            loss_pred = logcosh_loss(pred_flat, delta_true)
+        elif use_delta:
+            # Delta mode (Phase 7): target from diff_encoder
             loss_pred = logcosh_loss(pred_flat, target_flat)
-            # In delta mode, pred_flat IS the predicted delta (not a state)
-            # and target_flat IS the true delta (from diff_encoder)
             delta_true = target_flat
             delta_pred = pred_flat
-            z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)
         else:
             # Standard mode: MSE on normalized embeddings
             use_projector = os.environ.get("WM_USE_PROJECTOR", "1") == "1"
@@ -635,8 +722,6 @@ class WorldModelBase(CrucibleModel):
                     F.normalize(pred_flat, dim=-1),
                     F.normalize(target_flat, dim=-1),
                 )
-            # Delta-space losses (v2: transition geometry)
-            z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
             delta_true = target_flat - z_current    # actual edit displacement
             delta_pred = pred_flat - z_current      # predicted edit displacement
 
@@ -930,4 +1015,11 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "diff_encoder_loops": int(_get("diff_encoder_loops", "WM_DIFF_ENCODER_LOOPS", "4")),
         "freeze_diff_encoder": _get("freeze_diff_encoder", "WM_FREEZE_DIFF_ENCODER", "0") == "1",
         "predictor_dropout": float(_pd) if (_pd := _get("predictor_dropout", "WM_PREDICTOR_DROPOUT", "")) else None,
+        # Early-layer readout (Phase 8, geometry-informed)
+        "early_readout": _get("early_readout", "WM_EARLY_READOUT", "0") == "1",
+        "early_readout_loops": tuple(
+            int(x) for x in _get("early_readout_loops", "WM_EARLY_READOUT_LOOPS", "1,2,3").split(",")
+        ),
+        # State-space delta prediction (Phase 8)
+        "delta_statespace": _get("delta_statespace", "WM_DELTA_STATESPACE", "0") == "1",
     }
