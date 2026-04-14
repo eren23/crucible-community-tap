@@ -674,6 +674,55 @@ def main():
     print(f"  Time: {elapsed:.0f}s ({elapsed/60:.1f}m)")
     print(f"  Checkpoint: {final_path}")
 
+    # ---- Post-training evaluation suite ---------------------------------
+    run_eval = os.environ.get("WM_RUN_EVAL", "1") == "1"
+    best_ckpt = os.path.join(output_dir, "code_wm_best.pt")
+    eval_ckpt = best_ckpt if os.path.exists(best_ckpt) else final_path
+    eval_dir = os.path.join(tap_root, "evaluation", "code_wm")
+
+    if run_eval and os.path.isdir(eval_dir):
+        print(f"\n=== Post-Training Evaluation (checkpoint: {os.path.basename(eval_ckpt)}) ===")
+        eval_scripts = [
+            ("semantic_eval", ["--checkpoint", eval_ckpt, "--data", hdf5_path,
+                               "--num-samples", "2000", "--device", device]),
+            ("honest_retrieval", ["--checkpoint", eval_ckpt, "--data", hdf5_path,
+                                  "--num-query", "1000", "--num-gallery", "4000",
+                                  "--device", device,
+                                  "--out", os.path.join(output_dir, "honest_retrieval.json")]),
+        ]
+        for script_name, args in eval_scripts:
+            script_path = os.path.join(eval_dir, f"{script_name}.py")
+            if not os.path.exists(script_path):
+                print(f"  {script_name}: SKIP (not found)")
+                continue
+            print(f"  Running {script_name}...")
+            try:
+                import subprocess as _sp
+                result = _sp.run(
+                    [sys.executable, script_path] + args,
+                    capture_output=True, text=True, timeout=600,
+                    env={**os.environ, "PYTHONPATH": tap_root},
+                )
+                # Print last 15 lines of output (summary)
+                lines = (result.stdout or "").strip().split("\n")
+                for line in lines[-15:]:
+                    print(f"    {line}")
+                if result.returncode != 0:
+                    print(f"    STDERR: {(result.stderr or '')[-200:]}")
+                # Log results to W&B if JSON output exists
+                if use_wandb:
+                    out_file = os.path.join(output_dir, f"{script_name}.json")
+                    if os.path.exists(out_file):
+                        import json as _json
+                        with open(out_file) as _f:
+                            eval_results = _json.load(_f)
+                        for k, v in eval_results.items():
+                            if isinstance(v, (int, float)):
+                                wandb.run.summary[f"eval/{script_name}/{k}"] = v
+            except Exception as e:
+                print(f"    {script_name} FAILED: {e}")
+        print("=== Evaluation Complete ===")
+
     if use_wandb:
         wandb.finish()
     f.close()
