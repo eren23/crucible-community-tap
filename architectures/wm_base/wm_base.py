@@ -337,6 +337,10 @@ class WorldModelBase(CrucibleModel):
         # Predict target_encoder(x_{t+1}) - target_encoder(x_t) directly.
         # Different from delta_mode which uses a separate diff_encoder.
         delta_statespace: bool = False,
+        # Fix 1: Use normalized MSE on deltas (strip magnitude, match baseline fairness)
+        delta_normalize_loss: bool = False,
+        # Fix 2: Residual predictor — pred output is z_t + correction, delta = pred - z_t
+        delta_residual: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -368,6 +372,8 @@ class WorldModelBase(CrucibleModel):
         self.early_readout = early_readout
         self.early_readout_loops = early_readout_loops
         self.delta_statespace = delta_statespace
+        self.delta_normalize_loss = delta_normalize_loss
+        self.delta_residual = delta_residual
         self._delta_logged = False
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
@@ -687,12 +693,9 @@ class WorldModelBase(CrucibleModel):
         z_current = z_all[:, :-1].detach().reshape(-1, self.model_dim)  # [N, D]
 
         if self.delta_statespace:
-            # State-space delta mode (Phase 8): predict z_{t+1} - z_t directly
-            # Target is the actual state-space delta from the target encoder
-            # Predictor output IS the predicted delta
+            # State-space delta mode (Phase 8): predict state-space deltas
             with torch.no_grad():
                 z_current_target = z_target.reshape(-1, self.model_dim)  # target_enc(x_{t+1})
-                # z_current_target_prev: target_enc(x_t) for delta computation
                 flat_current_states = states[:, :-1].reshape(B * num_transitions, *state_shape)
                 if self.early_readout and self.layer_fusion is not None:
                     cur_result = self.target_encoder(flat_current_states, return_intermediates=True)
@@ -702,8 +705,22 @@ class WorldModelBase(CrucibleModel):
                 else:
                     z_current_target_prev = self.target_encoder(flat_current_states)
             delta_true = z_current_target.reshape(-1, self.model_dim) - z_current_target_prev.detach()
-            delta_pred = pred_flat  # predictor directly outputs delta
-            loss_pred = logcosh_loss(pred_flat, delta_true)
+
+            # Fix 2: Residual predictor — interpret pred as z_t + correction
+            # so delta_pred = pred - z_current (predictor works near identity)
+            if self.delta_residual:
+                delta_pred = pred_flat - z_current
+            else:
+                delta_pred = pred_flat
+
+            # Fix 1: Normalized loss — strip magnitude, match baseline fairness
+            if self.delta_normalize_loss:
+                loss_pred = F.mse_loss(
+                    F.normalize(delta_pred, dim=-1),
+                    F.normalize(delta_true, dim=-1),
+                )
+            else:
+                loss_pred = logcosh_loss(delta_pred, delta_true)
         elif use_delta:
             # Delta mode (Phase 7): target from diff_encoder
             loss_pred = logcosh_loss(pred_flat, target_flat)
@@ -1022,4 +1039,6 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         ),
         # State-space delta prediction (Phase 8)
         "delta_statespace": _get("delta_statespace", "WM_DELTA_STATESPACE", "0") == "1",
+        "delta_normalize_loss": _get("delta_normalize_loss", "WM_DELTA_NORMALIZE_LOSS", "0") == "1",
+        "delta_residual": _get("delta_residual", "WM_DELTA_RESIDUAL", "0") == "1",
     }

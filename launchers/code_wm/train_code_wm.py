@@ -193,10 +193,16 @@ def main():
     if norm_project:
         print(f"  Norm proj:  enabled")
     delta_statespace = os.environ.get("WM_DELTA_STATESPACE", "0") == "1"
+    delta_normalize = os.environ.get("WM_DELTA_NORMALIZE_LOSS", "0") == "1"
+    delta_residual = os.environ.get("WM_DELTA_RESIDUAL", "0") == "1"
     early_readout = os.environ.get("WM_EARLY_READOUT", "0") == "1"
     early_readout_loops = os.environ.get("WM_EARLY_READOUT_LOOPS", "1,2,3")
     if delta_statespace:
         print(f"  Delta SS:   ON (state-space delta prediction)")
+        if delta_normalize:
+            print(f"  Delta norm: ON (normalized MSE loss, magnitude-stripped)")
+        if delta_residual:
+            print(f"  Delta res:  ON (residual predictor, pred = z_t + correction)")
     if early_readout:
         print(f"  Early read: ON (loops={early_readout_loops})")
     if delta_mode:
@@ -266,15 +272,16 @@ def main():
         )
         use_wandb = True
         # Tags for filtering
-        wandb.run.tags = [f"seed-{seed}", f"dim-{model_dim}", mode]
+        tags = [f"seed-{seed}", f"dim-{model_dim}", mode]
         if delta_mode:
-            wandb.run.tags.append("delta-mode")
+            tags.append("delta-mode")
             if freeze_diff:
-                wandb.run.tags.append("frozen-encoder")
+                tags.append("frozen-encoder")
         if delta_statespace:
-            wandb.run.tags.append("delta-statespace")
+            tags.append("delta-statespace")
         if early_readout:
-            wandb.run.tags.append(f"early-readout-{early_readout_loops}")
+            tags.append(f"early-readout-{early_readout_loops}")
+        wandb.run.tags = tags
         print(f"W&B run: {wandb.run.url}")
     except Exception as e:
         print(f"W&B init failed ({e}), training without logging")
