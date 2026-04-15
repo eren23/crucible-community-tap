@@ -934,28 +934,30 @@ class WorldModelBase(CrucibleModel):
         # Apply contrastive or predictive loss at intermediate encoder loops
         # to prevent gradient attenuation from destroying delta signal.
         loss_aux = torch.tensor(0.0, device=states.device)
-        if self.training and self.aux_loops and hasattr(self, '_last_intermediates'):
-            intermediates = self._last_intermediates  # set during encoding
+        if self.training and self.aux_loops and self._last_intermediates is not None:
+            intermediates = self._last_intermediates  # [B*T, D] per loop
             for idx, loop_idx in enumerate(self.aux_loops):
                 if loop_idx - 1 >= len(intermediates):
                     continue
                 lam = self.lambda_aux[idx] if idx < len(self.lambda_aux) else self.lambda_aux[-1]
-                z_loop = intermediates[loop_idx - 1]  # [B*T, D] or [B, D]
+                # Reshape from [B*T, D] to [B, T, D], take current states [:, :-1]
+                z_loop_all = intermediates[loop_idx - 1].reshape(B, T, -1)
+                z_loop_cur = z_loop_all[:, :-1].reshape(B * num_transitions, -1)  # [B*(T-1), D]
+                z_tgt_flat = z_target.reshape(B * num_transitions, -1)  # [B*(T-1), D]
 
-                if self.aux_type == "contrast" and self.lambda_contrast > 0:
-                    # Reuse contrastive loss logic on this loop's embeddings
-                    # Simplified: compute pairwise cosine sim as aux signal
-                    z_n = F.normalize(z_loop, dim=-1)
-                    z_n_t = F.normalize(z_target[:, 0], dim=-1) if z_target.dim() == 3 else F.normalize(z_target, dim=-1)
+                if self.aux_type == "contrast":
+                    # Cosine alignment between loop output and target
+                    z_n = F.normalize(z_loop_cur, dim=-1)
+                    z_n_t = F.normalize(z_tgt_flat, dim=-1)
                     aux_cos = (z_n * z_n_t).sum(dim=-1).mean()
-                    loop_loss = 1.0 - aux_cos  # push toward target alignment
+                    loop_loss = 1.0 - aux_cos
                 else:
-                    # Predictive aux loss: predict target from this loop's output
-                    z_loop_pred = self.predictor(z_loop, z_action[:, 0] if z_action.dim() == 3 else z_action)
-                    z_tgt = z_target[:, 0] if z_target.dim() == 3 else z_target
+                    # Predictive: predict target from this loop's output
+                    z_act_flat = z_action.reshape(B * num_transitions, -1)
+                    z_loop_pred = self.predictor(z_loop_cur, z_act_flat)
                     loop_loss = F.mse_loss(
                         F.normalize(z_loop_pred, dim=-1),
-                        F.normalize(z_tgt, dim=-1),
+                        F.normalize(z_tgt_flat, dim=-1),
                     )
 
                 if torch.isfinite(loop_loss):
