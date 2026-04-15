@@ -333,6 +333,15 @@ class WorldModelBase(CrucibleModel):
         # When enabled, encoder must support return_intermediates=True.
         early_readout: bool = False,
         early_readout_loops: tuple[int, ...] = (1, 2, 3),  # 1-indexed loop iterations
+        # ── Auxiliary loop losses (Phase 9, deep supervision) ──
+        # Apply contrastive or predictive loss at intermediate loop outputs.
+        # Prevents gradient attenuation that causes 12x delta signal compression.
+        aux_loops: tuple[int, ...] = (),  # 1-indexed loop indices, e.g. (1, 2, 3)
+        lambda_aux: tuple[float, ...] | float = 0.3,  # per-loop weight(s) or single weight
+        aux_type: str = "contrast",  # "contrast" or "pred"
+        # ── Dense skip connections (Phase 9) ──
+        # Add z_initial residual at each encoder loop to preserve input signal.
+        dense_skip: bool = False,
         # ── State-space delta prediction (Phase 8) ──
         # Predict target_encoder(x_{t+1}) - target_encoder(x_t) directly.
         # Different from delta_mode which uses a separate diff_encoder.
@@ -371,6 +380,13 @@ class WorldModelBase(CrucibleModel):
         self.predictor_dropout = predictor_dropout
         self.early_readout = early_readout
         self.early_readout_loops = early_readout_loops
+        self.aux_loops = aux_loops
+        if isinstance(lambda_aux, (int, float)):
+            self.lambda_aux = tuple(float(lambda_aux) for _ in aux_loops) if aux_loops else ()
+        else:
+            self.lambda_aux = tuple(float(x) for x in lambda_aux)
+        self.aux_type = aux_type
+        self.dense_skip = dense_skip
         self.delta_statespace = delta_statespace
         self.delta_normalize_loss = delta_normalize_loss
         self.delta_residual = delta_residual
@@ -426,6 +442,13 @@ class WorldModelBase(CrucibleModel):
                 dim=self.model_dim,
             )
             print(f"[WMBase] early_readout ENABLED: loops={self.early_readout_loops}")
+
+        if self.aux_loops:
+            print(f"[WMBase] aux_loops ENABLED: loops={self.aux_loops}, "
+                  f"lambda={self.lambda_aux}, type={self.aux_type}")
+
+        if self.dense_skip:
+            print("[WMBase] dense_skip ENABLED: z_initial residual at each encoder loop")
 
         # Looped predictor
         _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
@@ -600,12 +623,21 @@ class WorldModelBase(CrucibleModel):
         flat_states = states.reshape(B * T, *state_shape)
 
         # Early-layer readout: extract intermediates from encoder loop iterations
-        if self.early_readout and self.layer_fusion is not None:
+        # Also extract intermediates when aux_loops is set (for deep supervision)
+        need_intermediates = (
+            (self.early_readout and self.layer_fusion is not None)
+            or bool(self.aux_loops)
+        )
+        self._last_intermediates = None
+        if need_intermediates:
             result = self.state_encoder(flat_states, return_intermediates=True)
             z_final, intermediates = result
-            # Select requested loop iterations (1-indexed -> 0-indexed)
-            selected = [intermediates[i - 1] for i in self.early_readout_loops]
-            z_all = self.layer_fusion(selected).reshape(B, T, -1)  # [B, T, D]
+            self._last_intermediates = intermediates  # cache for aux loss
+            if self.early_readout and self.layer_fusion is not None:
+                selected = [intermediates[i - 1] for i in self.early_readout_loops]
+                z_all = self.layer_fusion(selected).reshape(B, T, -1)  # [B, T, D]
+            else:
+                z_all = z_final.reshape(B, T, -1)  # [B, T, D]
         else:
             z_all = self.state_encoder(flat_states).reshape(B, T, -1)  # [B, T, D]
 
@@ -898,6 +930,39 @@ class WorldModelBase(CrucibleModel):
                     else:
                         loss_contrast = torch.tensor(0.0, device=states.device)
 
+        # ─── Auxiliary loop losses (Phase 9, deep supervision) ───
+        # Apply contrastive or predictive loss at intermediate encoder loops
+        # to prevent gradient attenuation from destroying delta signal.
+        loss_aux = torch.tensor(0.0, device=states.device)
+        if self.training and self.aux_loops and hasattr(self, '_last_intermediates'):
+            intermediates = self._last_intermediates  # set during encoding
+            for idx, loop_idx in enumerate(self.aux_loops):
+                if loop_idx - 1 >= len(intermediates):
+                    continue
+                lam = self.lambda_aux[idx] if idx < len(self.lambda_aux) else self.lambda_aux[-1]
+                z_loop = intermediates[loop_idx - 1]  # [B*T, D] or [B, D]
+
+                if self.aux_type == "contrast" and self.lambda_contrast > 0:
+                    # Reuse contrastive loss logic on this loop's embeddings
+                    # Simplified: compute pairwise cosine sim as aux signal
+                    z_n = F.normalize(z_loop, dim=-1)
+                    z_n_t = F.normalize(z_target[:, 0], dim=-1) if z_target.dim() == 3 else F.normalize(z_target, dim=-1)
+                    aux_cos = (z_n * z_n_t).sum(dim=-1).mean()
+                    loop_loss = 1.0 - aux_cos  # push toward target alignment
+                else:
+                    # Predictive aux loss: predict target from this loop's output
+                    z_loop_pred = self.predictor(z_loop, z_action[:, 0] if z_action.dim() == 3 else z_action)
+                    z_tgt = z_target[:, 0] if z_target.dim() == 3 else z_target
+                    loop_loss = F.mse_loss(
+                        F.normalize(z_loop_pred, dim=-1),
+                        F.normalize(z_tgt, dim=-1),
+                    )
+
+                if torch.isfinite(loop_loss):
+                    loss_aux = loss_aux + lam * loop_loss
+
+            loss = loss + loss_aux
+
         # Update EMA target encoder and step counter
         if self.training:
             self._update_ema()
@@ -913,6 +978,7 @@ class WorldModelBase(CrucibleModel):
             "loss_rollout": loss_rollout,
             "loss_path_consistency": loss_path_consistency,
             "loss_contrast": loss_contrast,
+            "loss_aux": loss_aux,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
@@ -1037,6 +1103,18 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "early_readout_loops": tuple(
             int(x) for x in _get("early_readout_loops", "WM_EARLY_READOUT_LOOPS", "1,2,3").split(",")
         ),
+        # Auxiliary loop losses (Phase 9, deep supervision)
+        "aux_loops": tuple(
+            int(x) for x in _get("aux_loops", "WM_AUX_LOOPS", "").split(",")
+        ) if _get("aux_loops", "WM_AUX_LOOPS", "") else (),
+        "lambda_aux": tuple(
+            float(x) for x in _get("lambda_aux", "WM_LAMBDA_AUX", "0.3").split(",")
+        ) if "," in _get("lambda_aux", "WM_LAMBDA_AUX", "0.3") else float(
+            _get("lambda_aux", "WM_LAMBDA_AUX", "0.3")
+        ),
+        "aux_type": _get("aux_type", "WM_AUX_TYPE", "contrast"),
+        # Dense skip connections (Phase 9)
+        "dense_skip": _get("dense_skip", "WM_DENSE_SKIP", "0") == "1",
         # State-space delta prediction (Phase 8)
         "delta_statespace": _get("delta_statespace", "WM_DELTA_STATESPACE", "0") == "1",
         "delta_normalize_loss": _get("delta_normalize_loss", "WM_DELTA_NORMALIZE_LOSS", "0") == "1",

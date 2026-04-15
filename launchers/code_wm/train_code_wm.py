@@ -463,6 +463,7 @@ def main():
         delta_ratio = out.get("delta_norm_ratio", torch.tensor(0.0)).item()
         loss_rollout = out.get("loss_rollout", torch.tensor(0.0)).item()
         loss_path = out.get("loss_path_consistency", torch.tensor(0.0)).item()
+        loss_aux = out.get("loss_aux", torch.tensor(0.0)).item()
 
         # Health checks
         if math.isnan(loss_val) or math.isinf(loss_val):
@@ -494,6 +495,8 @@ def main():
                 log_dict["train/loss_rollout"] = loss_rollout
             if loss_path > 0:
                 log_dict["train/loss_path_consistency"] = loss_path
+            if loss_aux > 0:
+                log_dict["train/loss_aux"] = loss_aux
             if dir_loss_until > 0:
                 log_dict["train/lambda_dir"] = model.lambda_dir
             # Phase 6 diagnostics

@@ -237,10 +237,14 @@ class CodeStateEncoder(nn.Module):
         h = self.pos_enc(h)                                 # [B, S+1, D]
 
         intermediates = [] if return_intermediates else None
+        h_initial = h  # save for dense skip connections
 
         # Looped transformer passes (weight-shared)
+        dense_skip = getattr(self, '_dense_skip', False)
         for _ in range(self.encoder_loops):
             h = self.block(h)                               # [B, S+1, D]
+            if dense_skip:
+                h = h + h_initial                           # preserve input signal
             if return_intermediates:
                 intermediates.append(self._readout(h))
 
@@ -313,8 +317,14 @@ class CodeWorldModel(WorldModelBase):
         state_encoder = self.build_state_encoder(None)
         action_encoder = self.build_action_encoder(None)
 
+        # Pass dense_skip flag to encoder (Phase 9)
+        state_encoder._dense_skip = self.dense_skip
+
         # Initialize shared components (predictor, EMA target)
         self._build_common(state_encoder, action_encoder)
+        # Propagate to target encoder too
+        if self.dense_skip:
+            self.target_encoder._dense_skip = True
 
     def build_state_encoder(self, args: Any) -> nn.Module:
         """Build byte-level code state encoder with looped transformer."""
