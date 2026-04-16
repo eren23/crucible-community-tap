@@ -572,6 +572,42 @@ def main():
                         dcos_k = (F.normalize(dt_k, dim=-1) * F.normalize(dp_k, dim=-1)).sum(-1).mean().item()
                         val_multistep[f"val/delta_cos_step{k+1}"] = dcos_k
 
+                # ─── Discriminability + effective rank metrics (Phase 9.5) ───
+                # Catches the "lift looks great but model can't tell edits apart" failure mode.
+                if not is_delta:
+                    N = z_curr.shape[0]
+                    # Effective rank (entropy of normalized SV spectrum)
+                    def _eff_rank(X):
+                        try:
+                            s = torch.linalg.svdvals(X.float())
+                            s = s / (s.sum() + 1e-12)
+                            return float(torch.exp(-(s * (s + 1e-12).log()).sum()).item())
+                        except Exception:
+                            return float('nan')
+                    online_eff_rank = _eff_rank(z_curr)
+                    target_eff_rank = _eff_rank(zt)
+                    pred_eff_rank = _eff_rank(zp)
+
+                    # K-NN: for each pred[i], is target[i] its nearest neighbor among all targets?
+                    z_pred_n = F.normalize(zp, dim=-1)
+                    z_tgt_n = F.normalize(zt, dim=-1)
+                    cross = z_pred_n @ z_tgt_n.T  # [N, N]
+                    knn_top1 = (cross.argmax(dim=-1) == torch.arange(N, device=cross.device)).float().mean().item()
+                    # KNN top-5 / top-10 if N is large enough
+                    knn_top5 = float('nan')
+                    knn_top10 = float('nan')
+                    if N >= 5:
+                        top5 = cross.topk(5, dim=-1).indices
+                        knn_top5 = (top5 == torch.arange(N, device=cross.device).unsqueeze(-1)).any(-1).float().mean().item()
+                    if N >= 10:
+                        top10 = cross.topk(10, dim=-1).indices
+                        knn_top10 = (top10 == torch.arange(N, device=cross.device).unsqueeze(-1)).any(-1).float().mean().item()
+
+                    # Off-diagonal cosine: how clustered are the targets?
+                    eye_mask = ~torch.eye(N, dtype=torch.bool, device=cross.device)
+                    target_self_sim = (z_tgt_n @ z_tgt_n.T)[eye_mask].mean().item()
+                    online_self_sim = (F.normalize(z_curr, dim=-1) @ F.normalize(z_curr, dim=-1).T)[eye_mask].mean().item()
+
                 if use_wandb:
                     val_log = {
                         "val/cosine_sim": cos_sim,
@@ -582,6 +618,15 @@ def main():
                     if not is_delta:
                         val_log["val/cos_copy_baseline"] = cos_copy
                         val_log["val/lift_over_copy"] = lift
+                        # Phase 9.5 — discriminability metrics
+                        val_log["val/eff_rank_online"] = online_eff_rank
+                        val_log["val/eff_rank_target"] = target_eff_rank
+                        val_log["val/eff_rank_pred"] = pred_eff_rank
+                        val_log["val/knn_top1"] = knn_top1
+                        val_log["val/knn_top5"] = knn_top5
+                        val_log["val/knn_top10"] = knn_top10
+                        val_log["val/target_self_sim"] = target_self_sim
+                        val_log["val/online_self_sim"] = online_self_sim
                     val_log.update(val_multistep)
 
                     # Per-example inference table (first N examples from val batch)
@@ -631,6 +676,8 @@ def main():
                     dcos_vals = [f"s{k+1}={v:.3f}" for k, v in enumerate(val_multistep.values())]
                     step_str += f" | multi-step: {' '.join(dcos_vals)}"
                 print(step_str)
+                if not is_delta:
+                    print(f"    eff_rank: online={online_eff_rank:.2f} target={target_eff_rank:.2f} pred={pred_eff_rank:.2f}  knn@1={knn_top1:.3f} @5={knn_top5:.3f} @10={knn_top10:.3f}")
 
                 # Early stopping on val delta_cos
                 if val_delta_cos > best_val_dcos:
