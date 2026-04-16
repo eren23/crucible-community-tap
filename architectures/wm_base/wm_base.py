@@ -945,14 +945,56 @@ class WorldModelBase(CrucibleModel):
                 z_loop_cur = z_loop_all[:, :-1].reshape(B * num_transitions, -1)  # [B*(T-1), D]
                 z_tgt_flat = z_target.reshape(B * num_transitions, -1)  # [B*(T-1), D]
 
-                if self.aux_type == "contrast":
-                    # Cosine alignment between loop output and target
+                if self.aux_type == "cos_align":
+                    # Plain cosine alignment between loop output and target
+                    # (no action conditioning — likely impossible task, kept for ablation)
                     z_n = F.normalize(z_loop_cur, dim=-1)
                     z_n_t = F.normalize(z_tgt_flat, dim=-1)
                     aux_cos = (z_n * z_n_t).sum(dim=-1).mean()
                     loop_loss = 1.0 - aux_cos
+                elif self.aux_type == "contrast":
+                    # NT-Xent supervised contrastive loss on per-loop deltas
+                    # Mirrors the final-layer lambda_contrast loss but applied
+                    # at intermediate loop l. Deltas = target - loop_cur.
+                    delta_loop = z_tgt_flat - z_loop_cur
+                    delta_norm_vec = delta_loop.norm(dim=-1, keepdim=True)
+                    norm_eps = 1e-4
+                    nondegenerate = (delta_norm_vec.squeeze(-1) > norm_eps)
+                    n_valid = int(nondegenerate.sum().item())
+                    if n_valid >= 2:
+                        delta_keep = delta_loop[nondegenerate]
+                        actions_keep = actions.reshape(-1, actions.shape[-1])[nondegenerate]
+                        delta_n = delta_keep / delta_keep.norm(
+                            dim=-1, keepdim=True
+                        ).clamp_min(norm_eps)
+                        N = delta_n.shape[0]
+                        temp = max(float(self.contrast_temperature), 0.01)
+                        delta_sim = (delta_n @ delta_n.T) / temp
+                        act_n = actions_keep / actions_keep.norm(
+                            dim=-1, keepdim=True
+                        ).clamp_min(1e-6)
+                        action_sim = act_n @ act_n.T
+                        eye = torch.eye(N, device=delta_n.device, dtype=torch.bool)
+                        pos_mask = (action_sim > self.contrast_pos_threshold) & ~eye
+                        pos_count = pos_mask.float().sum(dim=-1)
+                        valid_anchors = (pos_count > 0)
+                        if valid_anchors.any():
+                            delta_sim_masked = delta_sim.masked_fill(eye, -float("inf"))
+                            log_prob = F.log_softmax(delta_sim_masked, dim=-1)
+                            mean_log_prob_pos = (
+                                (pos_mask.float() * log_prob).sum(dim=-1)
+                                / pos_count.clamp_min(1)
+                            )
+                            loop_loss = -(
+                                mean_log_prob_pos * valid_anchors.float()
+                            ).sum() / valid_anchors.float().sum().clamp_min(1)
+                        else:
+                            loop_loss = torch.tensor(0.0, device=states.device)
+                    else:
+                        loop_loss = torch.tensor(0.0, device=states.device)
                 else:
-                    # Predictive: predict target from this loop's output
+                    # "pred" (default): predict target from this loop's output
+                    # via the predictor (ACTION-CONDITIONED).
                     z_act_flat = z_action.reshape(B * num_transitions, -1)
                     z_loop_pred = self.predictor(z_loop_cur, z_act_flat)
                     loop_loss = F.mse_loss(
