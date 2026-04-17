@@ -745,6 +745,120 @@ def main():
     print(f"  Time: {elapsed:.0f}s ({elapsed/60:.1f}m)")
     print(f"  Checkpoint: {final_path}")
 
+    # ---- Full-val KNN + eff_rank evaluation (paper-grade, B1 fix) -------
+    # Training-time val/knn metrics use a single 128-sample batch and are
+    # noisy batch-to-batch. This block runs the same metrics on the FULL
+    # val set (chunked batches) for a defensible paper number. Logged to
+    # W&B as val_full/* so it coexists with the per-eval-step val/* series.
+    run_full_val = os.environ.get("WM_RUN_FULL_VAL_EVAL", "1") == "1"
+    if run_full_val and not has_trajectories:
+        print(f"\n=== Full-val eval on {len(val_indices)} samples ===")
+        model.train(False)
+        z_before_all = []
+        z_after_all = []
+        z_pred_all = []
+        chunk = 128
+        try:
+            with torch.no_grad():
+                for i in range(0, len(val_indices), chunk):
+                    idx = np.sort(val_indices[i:i + chunk]).tolist()
+                    before = torch.from_numpy(before_ds[idx].astype(np.int64)).to(device)
+                    after = torch.from_numpy(after_ds[idx].astype(np.int64)).to(device)
+                    acts = torch.from_numpy(action_ds[idx].astype(np.float32)).to(device)
+                    zb = model.state_encoder(before)
+                    za = model.target_encoder(after)
+                    zc = model.action_encoder(acts)
+                    zp = model.predictor(zb, zc)
+                    z_before_all.append(F.normalize(zb, dim=-1).cpu())
+                    z_after_all.append(F.normalize(za, dim=-1).cpu())
+                    z_pred_all.append(F.normalize(zp, dim=-1).cpu())
+
+            z_before_all = torch.cat(z_before_all, dim=0)
+            z_after_all = torch.cat(z_after_all, dim=0)
+            z_pred_all = torch.cat(z_pred_all, dim=0)
+            N_full = z_before_all.shape[0]
+
+            def _eff_rank(X):
+                try:
+                    s = torch.linalg.svdvals(X.float())
+                    s = s / (s.sum() + 1e-12)
+                    return float(torch.exp(-(s * (s + 1e-12).log()).sum()).item())
+                except Exception:
+                    return float('nan')
+
+            eff_o_full = _eff_rank(z_before_all)
+            eff_t_full = _eff_rank(z_after_all)
+            eff_p_full = _eff_rank(z_pred_all)
+
+            # KNN — compute cross in chunks to avoid OOM at N=5000
+            # KNN@k: does target[i] appear in top-k nearest neighbors of pred[i]?
+            topk_hits_1 = 0
+            topk_hits_5 = 0
+            topk_hits_10 = 0
+            topk_hits_50 = 0
+            gap_diag_sum = 0.0
+            gap_off_count = 0
+            gap_off_sum = 0.0
+            for i in range(0, N_full, chunk):
+                pred_chunk = z_pred_all[i:i + chunk]
+                sims = pred_chunk @ z_after_all.T  # [chunk, N_full]
+                chunk_n = sims.shape[0]
+                true_idx = torch.arange(i, i + chunk_n)
+                diag_vals = sims[torch.arange(chunk_n), true_idx]
+                gap_diag_sum += float(diag_vals.sum())
+
+                # Top-k: find rank of true index
+                top50 = sims.topk(min(50, N_full), dim=-1).indices
+                is_hit_1 = (top50[:, :1] == true_idx.unsqueeze(-1)).any(-1)
+                is_hit_5 = (top50[:, :5] == true_idx.unsqueeze(-1)).any(-1)
+                is_hit_10 = (top50[:, :10] == true_idx.unsqueeze(-1)).any(-1)
+                is_hit_50 = (top50[:, :50] == true_idx.unsqueeze(-1)).any(-1)
+                topk_hits_1 += int(is_hit_1.sum())
+                topk_hits_5 += int(is_hit_5.sum())
+                topk_hits_10 += int(is_hit_10.sum())
+                topk_hits_50 += int(is_hit_50.sum())
+
+                # Off-diagonal mean (for gap metric)
+                mask = torch.ones_like(sims, dtype=torch.bool)
+                mask[torch.arange(chunk_n), true_idx] = False
+                gap_off_sum += float(sims[mask].sum())
+                gap_off_count += int(mask.sum())
+
+            knn_top1_full = topk_hits_1 / N_full
+            knn_top5_full = topk_hits_5 / N_full
+            knn_top10_full = topk_hits_10 / N_full
+            knn_top50_full = topk_hits_50 / N_full
+            cross_diag_mean = gap_diag_sum / N_full
+            cross_off_mean = gap_off_sum / max(gap_off_count, 1)
+
+            print(f"  N_full = {N_full}")
+            print(f"  eff_rank: online={eff_o_full:.2f} target={eff_t_full:.2f} pred={eff_p_full:.2f}")
+            print(f"  KNN@1={knn_top1_full:.4f} @5={knn_top5_full:.4f} @10={knn_top10_full:.4f} @50={knn_top50_full:.4f}")
+            print(f"  random baselines: @1={1/N_full:.4f} @5={5/N_full:.4f} @10={10/N_full:.4f}")
+            print(f"  cross diag={cross_diag_mean:+.4f} off={cross_off_mean:+.4f} gap={cross_diag_mean - cross_off_mean:+.4f}")
+
+            if use_wandb:
+                wandb.log({
+                    "val_full/N": N_full,
+                    "val_full/eff_rank_online": eff_o_full,
+                    "val_full/eff_rank_target": eff_t_full,
+                    "val_full/eff_rank_pred": eff_p_full,
+                    "val_full/knn_top1": knn_top1_full,
+                    "val_full/knn_top5": knn_top5_full,
+                    "val_full/knn_top10": knn_top10_full,
+                    "val_full/knn_top50": knn_top50_full,
+                    "val_full/cross_diag_mean": cross_diag_mean,
+                    "val_full/cross_off_mean": cross_off_mean,
+                    "val_full/cross_gap": cross_diag_mean - cross_off_mean,
+                }, step=total_steps)
+                wandb.run.summary["val_full/knn_top1"] = knn_top1_full
+                wandb.run.summary["val_full/knn_top5"] = knn_top5_full
+                wandb.run.summary["val_full/knn_top10"] = knn_top10_full
+                wandb.run.summary["val_full/eff_rank_online"] = eff_o_full
+        except Exception as exc:
+            print(f"  Full-val eval failed (non-fatal): {exc}")
+        model.train()
+
     # ---- Post-training evaluation suite ---------------------------------
     run_eval = os.environ.get("WM_RUN_EVAL", "1") == "1"
     best_ckpt = os.path.join(output_dir, "code_wm_best.pt")
