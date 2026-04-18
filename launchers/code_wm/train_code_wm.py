@@ -220,8 +220,22 @@ def main():
     print(f"  W&B:        {wandb_project}")
     print()
 
-    # ---- Seed (needed before W&B init for config logging) ----------------
+    # ---- Seed (MUST be set before any random init — model, optimizer,
+    # scheduler all touch the global RNG. Pre-2026-04-18 versions of this
+    # script set the seed AFTER model construction, which made WM_SEED
+    # control only data shuffling, not weight initialization. That bug
+    # produced ~3× cross-seed variance in val/knn metrics that was
+    # incorrectly reported as "natural seed variance." Fixed by setting
+    # ALL determinism knobs before the first random op.) -----------------
+    import random as _py_random
     seed = int(os.environ.get("WM_SEED", "42"))
+    _py_random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     # ---- Build model ----------------------------------------------------
     kwargs = wm_base_kwargs_from_env(None)
@@ -302,9 +316,10 @@ def main():
     )
 
     # ---- Train/Val split ------------------------------------------------
+    # NOTE: seed setting moved to before model construction (~line 224).
+    # Do NOT re-seed here — it would reset the RNG state mid-training
+    # and break determinism guarantees from line 224.
     val_frac = float(os.environ.get("WM_VAL_FRAC", "0.1"))
-    np.random.seed(seed)
-    torch.manual_seed(seed)
 
     if has_trajectories:
         # Split by trajectory, not by transition
