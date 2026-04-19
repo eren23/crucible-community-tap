@@ -808,12 +808,24 @@ class WorldModelBase(CrucibleModel):
             sig_loss, _ = self._compute_sigreg(z_flat)
             static_reg_loss = sig_loss
 
+        # ─── Predictor-output regularizer (Phase 9.5) ───
+        # Phase 9 audit: eff_rank_pred collapses to ~6/128 across all checkpoints
+        # even when eff_rank_online stays at 53-63. Apply a variance hinge directly
+        # on the predictor output to prevent that collapse.
+        pred_reg_mode = os.environ.get("WM_PRED_REG_MODE", "none")
+        lambda_pred_reg = float(os.environ.get("WM_LAMBDA_PRED_REG", "0.0"))
+        pred_reg_loss = torch.tensor(0.0, device=z_all.device)
+        if pred_reg_mode == "vicreg" and lambda_pred_reg > 0:
+            pred_std = pred_flat.std(dim=0)
+            pred_reg_loss = F.relu(1.0 - pred_std).mean()
+
         # ─── Combined loss (base) ───
         loss = (self.lambda_pred * loss_pred
                 + self.lambda_dir * loss_dir
                 + self.lambda_mag * loss_mag
                 + self.lambda_cov * loss_cov
-                + self.sigreg_weight * static_reg_loss)
+                + self.sigreg_weight * static_reg_loss
+                + lambda_pred_reg * pred_reg_loss)
 
         # Diagnostic: mean delta cosine sim and norm ratio
         delta_cos_sim = cos_sim.mean()
