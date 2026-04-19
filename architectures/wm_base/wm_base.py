@@ -1019,6 +1019,26 @@ class WorldModelBase(CrucibleModel):
 
             loss = loss + loss_aux
 
+        # ─── Trajectory straightness regularizer (Phase 9.5, per arxiv 2603.12231) ───
+        # Penalize curvature of the encoder's per-loop latent trajectory:
+        #   L_straight = mean(1 - cos(z_{l+1} - z_l, z_l - z_{l-1}))
+        # Lower curvature = straighter latent path = JEPA-style trajectory smoothing.
+        loss_straight = torch.tensor(0.0, device=states.device)
+        lambda_straight = float(os.environ.get("WM_LAMBDA_STRAIGHTNESS", "0.0"))
+        if (self.training and lambda_straight > 0
+                and self._last_intermediates is not None
+                and len(self._last_intermediates) >= 3):
+            inters = self._last_intermediates
+            triples = []
+            for l in range(1, len(inters) - 1):
+                d_prev = inters[l] - inters[l - 1]
+                d_next = inters[l + 1] - inters[l]
+                cos_l = F.cosine_similarity(d_prev, d_next, dim=-1)
+                triples.append((1.0 - cos_l).mean())
+            if triples:
+                loss_straight = torch.stack(triples).mean()
+                loss = loss + lambda_straight * loss_straight
+
         # Update EMA target encoder and step counter
         if self.training:
             self._update_ema()
@@ -1035,6 +1055,7 @@ class WorldModelBase(CrucibleModel):
             "loss_path_consistency": loss_path_consistency,
             "loss_contrast": loss_contrast,
             "loss_aux": loss_aux,
+            "loss_straight": loss_straight,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
