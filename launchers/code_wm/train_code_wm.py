@@ -246,8 +246,22 @@ def main():
         **kwargs,
     )
     model = model.to(device)
+
+    # ---- Load pretrained encoder weights (Phase 11) ----------------------
+    pretrained_ckpt = os.environ.get("WM_PRETRAINED_ENCODER", "")
+    if pretrained_ckpt and os.path.exists(pretrained_ckpt):
+        ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
+        src_sd = ckpt["model_state_dict"]
+        # Load only encoder + target_encoder weights, skip predictor
+        encoder_keys = {k: v for k, v in src_sd.items()
+                        if k.startswith(("state_encoder.", "target_encoder.", "action_encoder."))}
+        missing, unexpected = model.load_state_dict(encoder_keys, strict=False)
+        loaded = len(encoder_keys) - len(unexpected)
+        print(f"Loaded {loaded} encoder weights from {pretrained_ckpt} (skipped predictor)")
+
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {n_params:,} parameters")
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model: {n_params:,} parameters ({n_trainable:,} trainable)")
 
     # ---- W&B init -------------------------------------------------------
     use_wandb = False
