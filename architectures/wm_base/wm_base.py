@@ -130,20 +130,58 @@ class KoopmanPredictor(nn.Module):
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, z_state: Tensor, z_action: Tensor) -> Tensor:
-        """Predict next-state embedding via linear Koopman operator.
-
-        Args:
-            z_state:  [B, D] -- current state embedding
-            z_action: [B, D] -- action embedding
-
-        Returns:
-            [B, D] -- predicted next-state embedding
-        """
-        # Low-rank residual: z + U @ V.T @ z
+        """Predict next-state embedding via linear Koopman operator."""
         delta = z_state @ self.V          # [B, rank]
         delta = delta @ self.U.T          # [B, dim]
         z_next = z_state + delta + self.W(z_action) + self.bias
         return self.norm(z_next)
+
+
+class MLPPredictor(nn.Module):
+    """Nonlinear MLP predictor: concat(z_state, z_action) -> hidden -> output.
+
+    Middle ground between Koopman (linear, ~8K) and LoopedPredictor (transformer,
+    ~500K).  A 2-layer MLP with residual connection.  ~50-100K params depending
+    on hidden_ratio.
+    """
+
+    def __init__(self, dim: int, hidden_ratio: float = 4.0, dropout: float = 0.1):
+        super().__init__()
+        hidden = int(dim * hidden_ratio)
+        self.net = nn.Sequential(
+            nn.Linear(dim * 2, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, dim),
+        )
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, z_state: Tensor, z_action: Tensor) -> Tensor:
+        """Predict next-state embedding via MLP."""
+        x = torch.cat([z_state, z_action], dim=-1)  # [B, 2*D]
+        return self.norm(z_state + self.net(x))  # residual
+
+
+class MiniTransformerPredictor(nn.Module):
+    """Single-block transformer predictor (frozen encoder companion).
+
+    Same 2-token (state, action) approach as LoopedPredictor but with
+    just 1 block and configurable loops.  ~130K params at dim=128.
+    """
+
+    def __init__(self, dim: int, num_heads: int = 4, num_loops: int = 4,
+                 mlp_ratio: float = 4.0, dropout: float = 0.1):
+        super().__init__()
+        self.num_loops = num_loops
+        self.block = LoopedTransformerBlock(dim, num_heads, mlp_ratio=mlp_ratio, dropout=dropout)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, z_state: Tensor, z_action: Tensor) -> Tensor:
+        """Predict next-state embedding via single looped transformer block."""
+        x = torch.stack([z_state, z_action], dim=1)  # [B, 2, D]
+        for _ in range(self.num_loops):
+            x = self.block(x)
+        return self.norm(x[:, 0])
 
 
 class LoopedPredictor(nn.Module):
@@ -506,15 +544,17 @@ class WorldModelBase(CrucibleModel):
         if self.dense_skip:
             print("[WMBase] dense_skip ENABLED: z_initial residual at each encoder loop")
 
-        # Predictor: looped (default) or koopman (Phase 11)
+        # Predictor selection: looped (default), koopman, mlp, mini_transformer
         _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
         if self.predictor_type == "koopman":
-            self.predictor = KoopmanPredictor(
-                dim=self.model_dim,
-                rank=self.koopman_rank,
+            self.predictor = KoopmanPredictor(dim=self.model_dim, rank=self.koopman_rank)
+        elif self.predictor_type == "mlp":
+            self.predictor = MLPPredictor(dim=self.model_dim, hidden_ratio=self.mlp_ratio, dropout=_pred_dropout)
+        elif self.predictor_type == "mini_transformer":
+            self.predictor = MiniTransformerPredictor(
+                dim=self.model_dim, num_heads=self.num_heads,
+                num_loops=self.num_loops, mlp_ratio=self.mlp_ratio, dropout=_pred_dropout,
             )
-            print(f"[WMBase] KoopmanPredictor: dim={self.model_dim}, rank={self.koopman_rank}, "
-                  f"params={sum(p.numel() for p in self.predictor.parameters()):,}")
         else:
             self.predictor = LoopedPredictor(
                 dim=self.model_dim,
@@ -524,6 +564,9 @@ class WorldModelBase(CrucibleModel):
                 mlp_ratio=self.mlp_ratio,
                 dropout=_pred_dropout,
             )
+        _pred_params = sum(p.numel() for p in self.predictor.parameters())
+        print(f"[WMBase] predictor={self.predictor_type}, params={_pred_params:,}"
+              f"{' FROZEN_ENCODER' if self.freeze_encoder else ''}")
 
         # Prediction projector (BYOL/VICReg pattern):
         # Projects predictions and targets through an MLP before MSE.
