@@ -32,6 +32,13 @@ import torch
 import torch.nn.functional as F
 
 
+# Shared checkpoint loader -- see _shared.py
+_THIS_DIR = Path(__file__).parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+from _shared import load_codewm  # noqa: E402
+
+
 def load_model_and_data(
     checkpoint_path: str,
     data_path: str,
@@ -40,38 +47,8 @@ def load_model_and_data(
 ):
     """Load model from checkpoint plus held-out sample data."""
     import h5py
-    import importlib.util
 
-    # evaluation/code_wm/<script>.py -> tap root is parent.parent.parent
-    tap_root = Path(__file__).parent.parent.parent
-    for mod_name, mod_path in [
-        ("wm_base", tap_root / "architectures" / "wm_base" / "wm_base.py"),
-        ("code_wm", tap_root / "architectures" / "code_wm" / "code_wm.py"),
-    ]:
-        spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-        mod = importlib.util.module_from_spec(spec)
-        sys.modules[mod_name] = mod
-        spec.loader.exec_module(mod)
-
-    import code_wm
-
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = ckpt["config"]
-
-    model = code_wm.CodeWorldModel(
-        vocab_size=cfg["vocab_size"],
-        max_seq_len=cfg["max_seq_len"],
-        encoder_loops=cfg["encoder_loops"],
-        model_dim=cfg["model_dim"],
-        num_loops=cfg["num_loops"],
-        num_heads=cfg["num_heads"],
-        predictor_depth=2,
-        ema_decay=cfg["ema_decay"],
-        action_dim=cfg["action_dim"],
-    )
-    model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    model.to(device)
-    model.train(False)
+    model, cfg = load_codewm(checkpoint_path, device=device)
 
     f = h5py.File(data_path, "r")
     n_total = f["before_tokens"].shape[0]

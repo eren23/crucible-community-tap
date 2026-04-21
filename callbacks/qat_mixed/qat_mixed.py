@@ -19,58 +19,18 @@ Env vars:
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
+# Import shared QAT utilities from sibling _qat_common module
+_callbacks_dir = str(Path(__file__).parent.parent)
+if _callbacks_dir not in sys.path:
+    sys.path.insert(0, _callbacks_dir)
+
+from callbacks._qat_common import BaseQATCallback, get_quant_fn, parse_exclude_patterns
+
 from crucible.training.callbacks import TrainingCallback, register_callback
-
-
-# ---------------------------------------------------------------------------
-# Fake quantization functions (STE)
-# ---------------------------------------------------------------------------
-
-def fake_int8_quant(w):
-    """Straight-through estimator for int8 QAT -- gradient flows through w."""
-    import torch
-
-    if w.ndim != 2:
-        return w
-    with torch.no_grad():
-        scale = w.abs().amax(dim=1, keepdim=True) / 127.0
-        scale = scale.clamp_min(1.0 / 127.0)
-    q = torch.clamp(torch.round(w / scale), -128, 127)
-    return w + (q * scale - w).detach()
-
-
-def fake_int4_quant(w, group_size: int = 128):
-    """Straight-through estimator for int4 QAT -- gradient flows through w."""
-    import torch
-
-    if w.ndim != 2:
-        return w
-    rows, cols = w.shape
-
-    if cols % group_size != 0:
-        with torch.no_grad():
-            scale = w.abs().amax(dim=1, keepdim=True) / 7.0
-            scale = scale.clamp_min(1.0 / 7.0)
-        q = torch.clamp(torch.round(w / scale), -8, 7)
-        return w + (q * scale - w).detach()
-
-    w_grouped = w.reshape(rows, -1, group_size)
-    with torch.no_grad():
-        scale = w_grouped.abs().amax(dim=-1, keepdim=True) / 7.0
-        scale = scale.clamp_min(1.0 / 7.0)
-    q = torch.clamp(torch.round(w_grouped / scale), -8, 7)
-    dequant = (q * scale).reshape(rows, cols)
-    return w + (dequant - w).detach()
-
-
-def _get_quant_fn(bits: int):
-    """Return the fake-quant function for the given bit-width."""
-    if bits == 4:
-        return fake_int4_quant
-    # Default to int8 for 8-bit or any unrecognized value
-    return fake_int8_quant
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +62,7 @@ def _parse_pattern(raw: str) -> dict[str, int] | int:
 # Callback
 # ---------------------------------------------------------------------------
 
-class QatMixedCallback(TrainingCallback):
+class QatMixedCallback(BaseQATCallback, TrainingCallback):
     """Mixed-precision QAT with per-module bit-width assignment."""
 
     priority = 5  # Run early, before pruning callbacks
@@ -111,10 +71,10 @@ class QatMixedCallback(TrainingCallback):
         self.warmup_steps = int(os.environ.get("QAT_MIXED_WARMUP_STEPS", "500"))
         pattern_raw = os.environ.get("QAT_MIXED_PATTERN", "8")
         self.pattern = _parse_pattern(pattern_raw)
-        exclude_raw = os.environ.get("QAT_MIXED_EXCLUDE_PATTERNS", "tok_emb,embed_low")
-        self.exclude_patterns = tuple(p.strip() for p in exclude_raw.split(",") if p.strip())
+        self.exclude_patterns = parse_exclude_patterns("QAT_MIXED_EXCLUDE_PATTERNS", "tok_emb,embed_low")
         self._hooks: list[Any] = []
         self._enabled = False
+        self._bit_assignments: dict[str, int] = {}
 
     def _resolve_bits(self, module_name: str) -> int:
         """Determine the bit-width for a given module name."""
@@ -132,36 +92,13 @@ class QatMixedCallback(TrainingCallback):
         if model is None:
             return
 
-        from crucible.training.compression_utils import iter_prunable_layers
-
-        self._bit_assignments: dict[str, int] = {}
-
-        for name, module in iter_prunable_layers(model, exclude_patterns=self.exclude_patterns):
+        def _resolve_fn(name: str):
             bits = self._resolve_bits(name)
-            quant_fn = _get_quant_fn(bits)
+            return get_quant_fn(bits), bits
 
-            def _make_hook(mod_name: str, fn):
-                def _hook(mod, inputs):
-                    if self._enabled:
-                        mod.weight.data = fn(mod.weight.data)
-                return _hook
+        self._register_quant_hooks_base(model, None, bits=0, resolve_fn=_resolve_fn)
 
-            handle = module.register_forward_pre_hook(_make_hook(name, quant_fn))
-            self._hooks.append(handle)
-            self._bit_assignments[name] = bits
-
-    def on_train_begin(self, state: dict[str, Any]) -> None:
-        state["qat_bit_assignments"] = self._bit_assignments
-
-    def on_step_begin(self, step: int, state: dict[str, Any]) -> None:
-        if not self._enabled and step >= self.warmup_steps:
-            self._enabled = True
-
-    def on_train_end(self, state: dict[str, Any]) -> None:
-        for handle in self._hooks:
-            handle.remove()
-        self._hooks.clear()
-        self._enabled = False
+    # on_train_begin, on_step_begin, on_train_end inherited from BaseQATCallback
 
 
 register_callback("qat_mixed", QatMixedCallback, source="local")
