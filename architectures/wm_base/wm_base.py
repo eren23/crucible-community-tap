@@ -106,6 +106,46 @@ class LoopedTransformerBlock(nn.Module):
 # Looped Predictor
 # ---------------------------------------------------------------------------
 
+class KoopmanPredictor(nn.Module):
+    """Linear dynamics predictor: z_{t+1} = (I + U·V^T)·z_t + W·z_action + bias.
+
+    Inspired by Koopman operator theory: represent nonlinear dynamics as a
+    linear operator in a lifted space.  When the state encoder is frozen
+    (pre-trained), the encoder's feature space IS the lifted space, so a
+    low-rank linear transition should capture the dynamics.
+
+    ~8K params at dim=128, rank=16 vs LoopedPredictor's ~500K.
+    """
+
+    def __init__(self, dim: int, rank: int = 16):
+        super().__init__()
+        self.dim = dim
+        self.rank = rank
+        # Low-rank transition: K = I + U @ V.T
+        self.U = nn.Parameter(torch.randn(dim, rank) * 0.01)
+        self.V = nn.Parameter(torch.randn(dim, rank) * 0.01)
+        # Action projection
+        self.W = nn.Linear(dim, dim)
+        self.bias = nn.Parameter(torch.zeros(dim))
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, z_state: Tensor, z_action: Tensor) -> Tensor:
+        """Predict next-state embedding via linear Koopman operator.
+
+        Args:
+            z_state:  [B, D] -- current state embedding
+            z_action: [B, D] -- action embedding
+
+        Returns:
+            [B, D] -- predicted next-state embedding
+        """
+        # Low-rank residual: z + U @ V.T @ z
+        delta = z_state @ self.V          # [B, rank]
+        delta = delta @ self.U.T          # [B, dim]
+        z_next = z_state + delta + self.W(z_action) + self.bias
+        return self.norm(z_next)
+
+
 class LoopedPredictor(nn.Module):
     """Predicts z_next from (z_state, z_action) using weight-shared looping.
 
@@ -350,6 +390,11 @@ class WorldModelBase(CrucibleModel):
         delta_normalize_loss: bool = False,
         # Fix 2: Residual predictor — pred output is z_t + correction, delta = pred - z_t
         delta_residual: bool = False,
+        # ── Koopman predictor (Phase 11) ──
+        predictor_type: str = "looped",  # "looped" or "koopman"
+        koopman_rank: int = 16,
+        # ── Frozen encoder mode (Phase 11, DeltaTok-inspired) ──
+        freeze_encoder: bool = False,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -417,6 +462,14 @@ class WorldModelBase(CrucibleModel):
         for p in self.target_encoder.parameters():
             p.requires_grad = False
 
+        # Phase 11: freeze state encoder — only predictor + action encoder train
+        if self.freeze_encoder:
+            self.state_encoder.requires_grad_(False)
+            self.state_encoder.train(False)
+            n_frozen = sum(p.numel() for p in self.state_encoder.parameters())
+            n_trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            print(f"[WMBase] FROZEN encoder ({n_frozen:,} params frozen, {n_trainable:,} trainable)")
+
         # Delta-native mode: build diff encoder for encoding code diffs
         self.diff_encoder: nn.Module | None = None
         if self.delta_mode:
@@ -450,16 +503,26 @@ class WorldModelBase(CrucibleModel):
         if self.dense_skip:
             print("[WMBase] dense_skip ENABLED: z_initial residual at each encoder loop")
 
-        # Looped predictor
+        # Predictor: looped (default) or koopman (Phase 11)
+        self.predictor_type = predictor_type
+        self.freeze_encoder = freeze_encoder
         _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
-        self.predictor = LoopedPredictor(
-            dim=self.model_dim,
-            num_heads=self.num_heads,
-            depth=self.predictor_depth,
-            num_loops=self.num_loops,
-            mlp_ratio=self.mlp_ratio,
-            dropout=_pred_dropout,
-        )
+        if predictor_type == "koopman":
+            self.predictor = KoopmanPredictor(
+                dim=self.model_dim,
+                rank=koopman_rank,
+            )
+            print(f"[WMBase] KoopmanPredictor: dim={self.model_dim}, rank={koopman_rank}, "
+                  f"params={sum(p.numel() for p in self.predictor.parameters()):,}")
+        else:
+            self.predictor = LoopedPredictor(
+                dim=self.model_dim,
+                num_heads=self.num_heads,
+                depth=self.predictor_depth,
+                num_loops=self.num_loops,
+                mlp_ratio=self.mlp_ratio,
+                dropout=_pred_dropout,
+            )
 
         # Prediction projector (BYOL/VICReg pattern):
         # Projects predictions and targets through an MLP before MSE.
@@ -531,6 +594,8 @@ class WorldModelBase(CrucibleModel):
     @torch.no_grad()
     def _update_ema(self) -> None:
         """Exponential moving average update of target encoder."""
+        if self.freeze_encoder:
+            return  # frozen encoder: target stays at its init snapshot
         for p_target, p_online in zip(
             self.target_encoder.parameters(), self.state_encoder.parameters()
         ):
@@ -1196,4 +1261,9 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "delta_statespace": _get("delta_statespace", "WM_DELTA_STATESPACE", "0") == "1",
         "delta_normalize_loss": _get("delta_normalize_loss", "WM_DELTA_NORMALIZE_LOSS", "0") == "1",
         "delta_residual": _get("delta_residual", "WM_DELTA_RESIDUAL", "0") == "1",
+        # Koopman predictor (Phase 11)
+        "predictor_type": _get("predictor_type", "WM_PREDICTOR_TYPE", "looped"),
+        "koopman_rank": int(_get("koopman_rank", "WM_KOOPMAN_RANK", "16")),
+        # Frozen encoder mode (Phase 11, DeltaTok-inspired)
+        "freeze_encoder": _get("freeze_encoder", "WM_FREEZE_ENCODER", "0") == "1",
     }
