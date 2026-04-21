@@ -436,6 +436,9 @@ class WorldModelBase(CrucibleModel):
         self.delta_normalize_loss = delta_normalize_loss
         self.delta_residual = delta_residual
         self._delta_logged = False
+        self.predictor_type = predictor_type
+        self.koopman_rank = koopman_rank
+        self.freeze_encoder = freeze_encoder
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
         self.scheduled_rollout = scheduled_rollout
@@ -504,15 +507,13 @@ class WorldModelBase(CrucibleModel):
             print("[WMBase] dense_skip ENABLED: z_initial residual at each encoder loop")
 
         # Predictor: looped (default) or koopman (Phase 11)
-        self.predictor_type = predictor_type
-        self.freeze_encoder = freeze_encoder
         _pred_dropout = self.predictor_dropout if self.predictor_dropout is not None else self.dropout_rate
-        if predictor_type == "koopman":
+        if self.predictor_type == "koopman":
             self.predictor = KoopmanPredictor(
                 dim=self.model_dim,
-                rank=koopman_rank,
+                rank=self.koopman_rank,
             )
-            print(f"[WMBase] KoopmanPredictor: dim={self.model_dim}, rank={koopman_rank}, "
+            print(f"[WMBase] KoopmanPredictor: dim={self.model_dim}, rank={self.koopman_rank}, "
                   f"params={sum(p.numel() for p in self.predictor.parameters()):,}")
         else:
             self.predictor = LoopedPredictor(
