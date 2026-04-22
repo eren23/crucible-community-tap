@@ -252,12 +252,22 @@ def main():
     if pretrained_ckpt and os.path.exists(pretrained_ckpt):
         ckpt = torch.load(pretrained_ckpt, map_location=device, weights_only=False)
         src_sd = ckpt["model_state_dict"]
-        # Load only encoder + target_encoder weights, skip predictor
-        encoder_keys = {k: v for k, v in src_sd.items()
-                        if k.startswith(("state_encoder.", "target_encoder.", "action_encoder."))}
+        # Detect format: keys with "state_encoder." prefix (full model ckpt)
+        # vs bare keys (pretrain_encoder.py output)
+        has_prefix = any(k.startswith("state_encoder.") for k in src_sd)
+        if has_prefix:
+            encoder_keys = {k: v for k, v in src_sd.items()
+                            if k.startswith(("state_encoder.", "target_encoder.", "action_encoder."))}
+        else:
+            # Bare encoder keys — add prefix for state + target encoder
+            encoder_keys = {}
+            for k, v in src_sd.items():
+                encoder_keys[f"state_encoder.{k}"] = v
+                encoder_keys[f"target_encoder.{k}"] = v.clone()
         missing, unexpected = model.load_state_dict(encoder_keys, strict=False)
         loaded = len(encoder_keys) - len(unexpected)
-        print(f"Loaded {loaded} encoder weights from {pretrained_ckpt} (skipped predictor)")
+        print(f"Loaded {loaded} encoder weights from {pretrained_ckpt}"
+              f" ({'prefixed' if has_prefix else 'bare → state+target'})")
 
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
