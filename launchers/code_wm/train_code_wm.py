@@ -320,6 +320,7 @@ def main():
                 "noise_strategy": noise_strategy,
                 "diff_recon": diff_recon,
                 "lambda_diff_recon": lambda_diff_recon,
+                "use_bytes": use_bytes,
             },
         )
         use_wandb = True
@@ -337,6 +338,8 @@ def main():
             tags.append(f"noise-{noise_strategy}-{token_noise_prob}")
         if diff_recon:
             tags.append("diff-recon")
+        if use_bytes:
+            tags.append("byte-tokens")
         wandb.run.tags = tags
         print(f"W&B run: {wandb.run.url}")
     except Exception as e:
@@ -394,8 +397,21 @@ def main():
         print(f"Split: {len(train_indices):,} train, {len(val_indices):,} val (seed={seed})")
 
     # ---- Batch loaders --------------------------------------------------
-    before_ds = f["before_tokens"]
-    after_ds = f["after_tokens"]
+    # Paper 3: byte-token mode uses raw UTF-8 bytes instead of AST tokens.
+    # The HDF5 must have been built with rebuild_with_bytes.py.
+    use_bytes = os.environ.get("WM_USE_BYTES", "0") == "1"
+    if use_bytes and "before_bytes" in f:
+        before_ds = f["before_bytes"]
+        after_ds = f["after_bytes"]
+        byte_vocab = int(f["metadata"].attrs.get("byte_vocab_size", 257))
+        print(f"  BYTE MODE: using raw byte tokens (vocab={byte_vocab})")
+    elif use_bytes:
+        print(f"  WARNING: WM_USE_BYTES=1 but no before_bytes in HDF5, falling back to AST tokens")
+        before_ds = f["before_tokens"]
+        after_ds = f["after_tokens"]
+    else:
+        before_ds = f["before_tokens"]
+        after_ds = f["after_tokens"]
     action_ds = f["edit_actions"]
     has_diffs = "diff_tokens" in f
     diff_ds = f["diff_tokens"] if has_diffs else None
