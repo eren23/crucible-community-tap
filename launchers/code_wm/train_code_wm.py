@@ -94,11 +94,12 @@ def main():
     scheduled_rollout = os.environ.get("WM_SCHEDULED_ROLLOUT", "0") == "1"
     norm_project = os.environ.get("WM_NORM_PROJECT", "0") == "1"
 
-    # Paper 3 config (nuisance injection + diff reconstruction)
+    # Paper 3 config (nuisance injection + diff reconstruction + byte tokens)
     token_noise_prob = float(os.environ.get("WM_TOKEN_NOISE_PROB", "0.0"))
     noise_strategy = os.environ.get("WM_NOISE_STRATEGY", "random_ident")
     diff_recon = os.environ.get("WM_DIFF_RECON", "0") == "1"
     lambda_diff_recon = float(os.environ.get("WM_LAMBDA_DIFF_RECON", "1.0"))
+    use_bytes = os.environ.get("WM_USE_BYTES", "0") == "1"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(output_dir, exist_ok=True)
@@ -399,7 +400,6 @@ def main():
     # ---- Batch loaders --------------------------------------------------
     # Paper 3: byte-token mode uses raw UTF-8 bytes instead of AST tokens.
     # The HDF5 must have been built with rebuild_with_bytes.py.
-    use_bytes = os.environ.get("WM_USE_BYTES", "0") == "1"
     if use_bytes and "before_bytes" in f:
         before_ds = f["before_bytes"]
         after_ds = f["after_bytes"]
