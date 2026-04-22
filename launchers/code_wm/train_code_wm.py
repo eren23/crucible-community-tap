@@ -94,6 +94,12 @@ def main():
     scheduled_rollout = os.environ.get("WM_SCHEDULED_ROLLOUT", "0") == "1"
     norm_project = os.environ.get("WM_NORM_PROJECT", "0") == "1"
 
+    # Paper 3 config (nuisance injection + diff reconstruction)
+    token_noise_prob = float(os.environ.get("WM_TOKEN_NOISE_PROB", "0.0"))
+    noise_strategy = os.environ.get("WM_NOISE_STRATEGY", "random_ident")
+    diff_recon = os.environ.get("WM_DIFF_RECON", "0") == "1"
+    lambda_diff_recon = float(os.environ.get("WM_LAMBDA_DIFF_RECON", "1.0"))
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -211,6 +217,10 @@ def main():
             print(f"  Pred drop:  {pred_dropout}")
         if not has_diffs:
             print(f"  WARNING: delta_mode=1 but data has no diff_tokens! Will fall back to standard JEPA.")
+    if token_noise_prob > 0:
+        print(f"  Token noise: prob={token_noise_prob}, strategy={noise_strategy}")
+    if diff_recon:
+        print(f"  Diff recon: ON (lambda={lambda_diff_recon})")
     print(f"  Vocab:      {vocab_size} (data={data_vocab}, diff={data_diff_vocab})")
     print(f"  Training:   {total_steps} steps, batch={batch_size}, lr={lr}")
     tap_sha = _git_sha(tap_root)
@@ -306,6 +316,10 @@ def main():
                 "delta_statespace": delta_statespace,
                 "early_readout": early_readout,
                 "early_readout_loops": early_readout_loops,
+                "token_noise_prob": token_noise_prob,
+                "noise_strategy": noise_strategy,
+                "diff_recon": diff_recon,
+                "lambda_diff_recon": lambda_diff_recon,
             },
         )
         use_wandb = True
@@ -319,6 +333,10 @@ def main():
             tags.append("delta-statespace")
         if early_readout:
             tags.append(f"early-readout-{early_readout_loops}")
+        if token_noise_prob > 0:
+            tags.append(f"noise-{noise_strategy}-{token_noise_prob}")
+        if diff_recon:
+            tags.append("diff-recon")
         wandb.run.tags = tags
         print(f"W&B run: {wandb.run.url}")
     except Exception as e:
@@ -384,6 +402,37 @@ def main():
     if has_diffs:
         print(f"  Diff tokens: available (delta mode ready)")
 
+    # ---- Token-level nuisance injection (Paper 3) ------------------------
+    # Identifier hash buckets span tokens 100-611 in the AST vocabulary.
+    # Corrupting these injects nuisance variation that JEPA must learn to
+    # discard — directly testing whether low nuisance causes collapse.
+    IDENT_LO, IDENT_HI = 100, 612  # half-open range of identifier buckets
+    UNK_TOKEN = 615
+
+    def _inject_token_noise(tokens: torch.Tensor) -> torch.Tensor:
+        """Corrupt identifier tokens in-place for nuisance injection.
+
+        Args:
+            tokens: [B, S] or [B, T, S] int64 tensor of AST token IDs.
+        Returns:
+            tokens with random identifier corruption applied.
+        """
+        if token_noise_prob <= 0:
+            return tokens
+        is_ident = (tokens >= IDENT_LO) & (tokens < IDENT_HI)
+        corrupt_mask = torch.rand_like(tokens, dtype=torch.float32) < token_noise_prob
+        corrupt_mask = corrupt_mask & is_ident  # only corrupt identifiers
+        n_corrupt = corrupt_mask.sum().item()
+        if n_corrupt == 0:
+            return tokens
+        if noise_strategy == "mask_unk":
+            tokens[corrupt_mask] = UNK_TOKEN
+        else:  # "random_ident" (default)
+            tokens[corrupt_mask] = torch.randint(
+                IDENT_LO, IDENT_HI, (n_corrupt,), device=tokens.device,
+            )
+        return tokens
+
     def get_single_step_batch(pool_indices):
         """Classic single-step batch: states=[B,2,S], actions=[B,1,A]."""
         idx = np.sort(np.random.choice(pool_indices, size=batch_size, replace=False))
@@ -391,6 +440,8 @@ def main():
         before = torch.from_numpy(before_ds[idx_list].astype(np.int64)).to(device)
         actions = torch.from_numpy(action_ds[idx_list].astype(np.float32)).to(device)
         after = torch.from_numpy(after_ds[idx_list].astype(np.int64)).to(device)
+        before = _inject_token_noise(before)
+        after = _inject_token_noise(after)
         batch = {"states": torch.stack([before, after], dim=1), "actions": actions.unsqueeze(1)}
         if diff_ds is not None:
             batch["diff_tokens"] = torch.from_numpy(diff_ds[idx_list].astype(np.int64)).to(device).unsqueeze(1)
@@ -423,8 +474,9 @@ def main():
             if all_diffs is not None:
                 all_diffs[b] = diff_ds[idx_range].astype(np.int64)
 
+        states_t = _inject_token_noise(torch.from_numpy(all_states).to(device))
         batch = {
-            "states": torch.from_numpy(all_states).to(device),
+            "states": states_t,
             "actions": torch.from_numpy(all_actions).to(device),
         }
         if all_diffs is not None:
@@ -503,6 +555,8 @@ def main():
         loss_rollout = out.get("loss_rollout", torch.tensor(0.0)).item()
         loss_path = out.get("loss_path_consistency", torch.tensor(0.0)).item()
         loss_aux = out.get("loss_aux", torch.tensor(0.0)).item()
+        loss_diff_recon = out.get("loss_diff_recon", torch.tensor(0.0)).item()
+        diff_tok_acc = out.get("diff_token_acc", torch.tensor(0.0)).item()
 
         # Health checks
         if math.isnan(loss_val) or math.isinf(loss_val):
@@ -538,6 +592,9 @@ def main():
                 log_dict["train/loss_aux"] = loss_aux
             if dir_loss_until > 0:
                 log_dict["train/lambda_dir"] = model.lambda_dir
+            if diff_recon:
+                log_dict["train/loss_diff_recon"] = loss_diff_recon
+                log_dict["train/diff_token_acc"] = diff_tok_acc
             # Phase 6 diagnostics
             if noise_sigma > 0:
                 log_dict["train/noise_sigma"] = out.get("noise_sigma", torch.tensor(0.0)).item()
@@ -553,6 +610,8 @@ def main():
                 extra += f" roll={loss_rollout:.4f}"
             if loss_path > 0:
                 extra += f" path={loss_path:.4f}"
+            if loss_diff_recon > 0:
+                extra += f" diff_ce={loss_diff_recon:.4f} tok_acc={diff_tok_acc:.3f}"
             print(
                 f"step {step:5d}/{total_steps} | "
                 f"loss={loss_val:.4f} pred={loss_pred:.4f} dir={loss_dir:.4f}{extra} | "
@@ -667,6 +726,12 @@ def main():
                         val_log["val/target_self_sim"] = target_self_sim
                         val_log["val/online_self_sim"] = online_self_sim
                     val_log.update(val_multistep)
+                    # Paper 3: diff recon metrics from val forward pass
+                    val_diff_recon = eo.get("loss_diff_recon", torch.tensor(0.0)).item()
+                    val_diff_acc = eo.get("diff_token_acc", torch.tensor(0.0)).item()
+                    if diff_recon and val_diff_recon > 0:
+                        val_log["val/loss_diff_recon"] = val_diff_recon
+                        val_log["val/diff_token_acc"] = val_diff_acc
 
                     # Per-example inference table (first N examples from val batch)
                     n_examples = min(10, zp.shape[0])
@@ -717,6 +782,8 @@ def main():
                 print(step_str)
                 if not is_delta:
                     print(f"    eff_rank: online={online_eff_rank:.2f} target={target_eff_rank:.2f} pred={pred_eff_rank:.2f}  knn@1={knn_top1:.3f} @5={knn_top5:.3f} @10={knn_top10:.3f}")
+                if diff_recon and eo.get("loss_diff_recon", torch.tensor(0.0)).item() > 0:
+                    print(f"    diff_recon: ce={eo['loss_diff_recon'].item():.4f} tok_acc={eo['diff_token_acc'].item():.3f}")
 
                 # Early stopping on val delta_cos
                 if val_delta_cos > best_val_dcos:

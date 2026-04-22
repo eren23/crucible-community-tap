@@ -93,10 +93,10 @@ class LoopedTransformerBlock(nn.Module):
             nn.Dropout(dropout),
         )
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, attn_mask: Tensor | None = None) -> Tensor:
         """Forward pass. x: [B, S, D] (sequence of tokens)."""
         h = self.norm1(x)
-        h, _ = self.attn(h, h, h, need_weights=False)
+        h, _ = self.attn(h, h, h, attn_mask=attn_mask, need_weights=False)
         x = x + h
         x = x + self.mlp(self.norm2(x))
         return x
@@ -300,6 +300,105 @@ class DiffEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# DiffDecoderHead (Paper 3 — explicit change-space target via cross-entropy)
+# ---------------------------------------------------------------------------
+
+class DiffDecoderHead(nn.Module):
+    """Decode diff tokens from predictor output via cross-entropy.
+
+    Given the JEPA predictor's z_pred, decode back to explicit diff tokens.
+    This forces the latent space to preserve change-specific information
+    that pure MSE prediction compresses away on symbolic data.
+
+    Architecture:
+        z_pred [B, D] → project to seed token [B, 1, D]
+        concat with shifted diff_token embeddings [B, S-1, D]
+        → LoopedTransformerBlock × num_loops (causal attention)
+        → Linear → [B, S, diff_vocab_size] logits
+
+    Teacher-forced during training: ground-truth diff tokens shifted right.
+    """
+
+    def __init__(
+        self,
+        model_dim: int = 128,
+        diff_vocab_size: int = 700,
+        num_heads: int = 4,
+        num_loops: int = 4,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        max_diff_len: int = 512,
+    ):
+        super().__init__()
+        self.model_dim = model_dim
+        self.num_loops = num_loops
+
+        # Project z_pred to seed token
+        self.seed_proj = nn.Linear(model_dim, model_dim)
+
+        # Diff token embedding (shared vocab with DiffEncoder)
+        self.embedding = nn.Embedding(diff_vocab_size, model_dim)
+        self.pos_enc = nn.Embedding(max_diff_len + 1, model_dim)  # +1 for seed
+
+        # Causal transformer decoder (weight-shared looped block)
+        self.block = LoopedTransformerBlock(
+            dim=model_dim,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            dropout=dropout,
+        )
+
+        # Output projection to diff token logits
+        self.head = nn.Linear(model_dim, diff_vocab_size)
+        self.norm = nn.LayerNorm(model_dim)
+
+    def forward(
+        self, z_pred: Tensor, diff_tokens: Tensor,
+    ) -> Tensor:
+        """Teacher-forced diff token generation.
+
+        Args:
+            z_pred: [B, D] — predictor output embedding
+            diff_tokens: [B, S] — ground-truth diff tokens (full sequence)
+
+        Returns:
+            [B, S, V] — logits over diff vocabulary at each position.
+            Position i predicts diff_tokens[i] given z_pred and diff_tokens[:i].
+        """
+        B, S = diff_tokens.shape
+        device = z_pred.device
+
+        # Seed token from predictor output
+        seed = self.seed_proj(z_pred).unsqueeze(1)  # [B, 1, D]
+
+        # Embed shifted diff tokens (positions 0..S-1 predict 1..S)
+        tok_emb = self.embedding(diff_tokens)  # [B, S, D]
+        positions = torch.arange(S + 1, device=device)
+        seed = seed + self.pos_enc(positions[:1])  # pos 0 for seed
+        tok_emb = tok_emb + self.pos_enc(positions[1:])  # pos 1..S
+
+        # Concat: [seed, tok_0, tok_1, ..., tok_{S-1}] → [B, S+1, D]
+        h = torch.cat([seed, tok_emb], dim=1)
+
+        # Causal mask: each position attends only to itself and earlier
+        causal = torch.triu(
+            torch.ones(S + 1, S + 1, device=device, dtype=torch.bool), diagonal=1,
+        )
+
+        # Looped causal transformer
+        for _ in range(self.num_loops):
+            h = self.block(h, attn_mask=causal)
+
+        h = self.norm(h)
+
+        # Output logits for positions 0..S (predicting tokens 0..S)
+        # Position 0 (seed) predicts first diff token, position S-1 predicts token S
+        # We take positions 0..S-1 → predict tokens 0..S-1
+        logits = self.head(h[:, :S])  # [B, S, V]
+        return logits
+
+
+# ---------------------------------------------------------------------------
 # LogCosh loss (from DeltaTok — smooth near 0, robust to outliers)
 # ---------------------------------------------------------------------------
 
@@ -433,6 +532,10 @@ class WorldModelBase(CrucibleModel):
         koopman_rank: int = 16,
         # ── Frozen encoder mode (Phase 11, DeltaTok-inspired) ──
         freeze_encoder: bool = False,
+        # ── Diff reconstruction head (Paper 3, explicit change-space) ──
+        diff_recon: bool = False,
+        lambda_diff_recon: float = 1.0,
+        diff_decoder_loops: int = 4,
     ):
         super().__init__()
         self.model_dim = model_dim
@@ -477,6 +580,9 @@ class WorldModelBase(CrucibleModel):
         self.predictor_type = predictor_type
         self.koopman_rank = koopman_rank
         self.freeze_encoder = freeze_encoder
+        self.diff_recon = diff_recon
+        self.lambda_diff_recon = lambda_diff_recon
+        self.diff_decoder_loops = diff_decoder_loops
         self.noise_sigma = noise_sigma
         self.noise_anneal_steps = noise_anneal_steps
         self.scheduled_rollout = scheduled_rollout
@@ -586,6 +692,21 @@ class WorldModelBase(CrucibleModel):
             nn.GELU(),
             nn.Linear(proj_dim, self.model_dim),
         )
+
+        # Diff reconstruction decoder (Paper 3 — explicit change-space target)
+        self.diff_decoder: DiffDecoderHead | None = None
+        if self.diff_recon:
+            self.diff_decoder = DiffDecoderHead(
+                model_dim=self.model_dim,
+                diff_vocab_size=self.diff_vocab_size,
+                num_heads=self.num_heads,
+                num_loops=self.diff_decoder_loops,
+                mlp_ratio=self.mlp_ratio,
+                dropout=self.dropout_rate,
+            )
+            _dec_params = sum(p.numel() for p in self.diff_decoder.parameters())
+            print(f"[WMBase] diff_recon ENABLED: decoder params={_dec_params:,}, "
+                  f"lambda={self.lambda_diff_recon}")
 
         # Step counter for scheduled rollout / noise annealing
         self.register_buffer("_train_step", torch.tensor(0, dtype=torch.long))
@@ -1148,6 +1269,31 @@ class WorldModelBase(CrucibleModel):
                 loss_straight = torch.stack(triples).mean()
                 loss = loss + lambda_straight * loss_straight
 
+        # ─── Diff reconstruction loss (Paper 3 — explicit change-space) ───
+        # Decode predictor output back to diff tokens via cross-entropy.
+        # Forces the latent space to retain change-specific information
+        # that MSE prediction compresses away on symbolic data.
+        loss_diff_recon = torch.tensor(0.0, device=states.device)
+        diff_token_acc = torch.tensor(0.0, device=states.device)
+        if self.diff_decoder is not None and diff_tokens is not None:
+            # diff_tokens: [B, T-1, S] or [B, 1, S]
+            dt_flat = diff_tokens[:, :num_transitions].reshape(
+                B * num_transitions, -1,
+            )  # [N, S]
+            logits = self.diff_decoder(pred_flat, dt_flat)  # [N, S, V]
+            loss_diff_recon = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)),
+                dt_flat.reshape(-1),
+                ignore_index=0,  # ignore PAD tokens
+            )
+            loss = loss + self.lambda_diff_recon * loss_diff_recon
+            # Token-level accuracy (non-pad)
+            with torch.no_grad():
+                preds_tok = logits.argmax(dim=-1)  # [N, S]
+                non_pad = dt_flat != 0
+                if non_pad.any():
+                    diff_token_acc = (preds_tok[non_pad] == dt_flat[non_pad]).float().mean()
+
         # Update EMA target encoder and step counter
         if self.training:
             self._update_ema()
@@ -1165,6 +1311,8 @@ class WorldModelBase(CrucibleModel):
             "loss_contrast": loss_contrast,
             "loss_aux": loss_aux,
             "loss_straight": loss_straight,
+            "loss_diff_recon": loss_diff_recon,
+            "diff_token_acc": diff_token_acc,
             "delta_cos_sim": delta_cos_sim,
             "delta_norm_ratio": delta_norm_ratio,
             "pred_embeddings": pred_embeddings,
@@ -1310,4 +1458,8 @@ def wm_base_kwargs_from_env(args: Any | None = None) -> dict[str, Any]:
         "koopman_rank": int(_get("koopman_rank", "WM_KOOPMAN_RANK", "16")),
         # Frozen encoder mode (Phase 11, DeltaTok-inspired)
         "freeze_encoder": _get("freeze_encoder", "WM_FREEZE_ENCODER", "0") == "1",
+        # Diff reconstruction head (Paper 3, explicit change-space)
+        "diff_recon": _get("diff_recon", "WM_DIFF_RECON", "0") == "1",
+        "lambda_diff_recon": float(_get("lambda_diff_recon", "WM_LAMBDA_DIFF_RECON", "1.0")),
+        "diff_decoder_loops": int(_get("diff_decoder_loops", "WM_DIFF_DECODER_LOOPS", "4")),
     }
