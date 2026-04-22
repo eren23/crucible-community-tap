@@ -151,8 +151,8 @@ def main():
         encoder.train()
         head.train()
 
-        # Sample batch
-        idx = np.random.choice(train_idx, batch_size, replace=False)
+        # Sample batch (sorted for HDF5 fancy indexing)
+        idx = np.sort(np.random.choice(train_idx, batch_size, replace=False))
         before = torch.from_numpy(f["before_tokens"][idx].astype(np.int64)).to(device)
         actions = torch.from_numpy(f["edit_actions"][idx].astype(np.float32)).to(device)
 
@@ -192,7 +192,7 @@ def main():
             encoder.train(False)
             with torch.no_grad():
                 # Val batch
-                vidx = np.random.choice(val_idx, min(batch_size, len(val_idx)), replace=False)
+                vidx = np.sort(np.random.choice(val_idx, min(batch_size, len(val_idx)), replace=False))
                 vbefore = torch.from_numpy(f["before_tokens"][vidx].astype(np.int64)).to(device)
                 vactions = torch.from_numpy(f["edit_actions"][vidx].astype(np.float32)).to(device)
 
