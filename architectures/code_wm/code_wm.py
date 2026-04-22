@@ -153,12 +153,39 @@ class AttentionPooling(nn.Module):
         self.query = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
         self.attn = nn.MultiheadAttention(dim, num_heads=1, batch_first=True)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, key_padding_mask: Tensor | None = None) -> Tensor:
         """x: [B, S, D] -> [B, D]"""
         B = x.shape[0]
         q = self.query.expand(B, -1, -1)  # [B, 1, D]
-        out, _ = self.attn(q, x, x, need_weights=False)  # [B, 1, D]
+        out, _ = self.attn(q, x, x, key_padding_mask=key_padding_mask, need_weights=False)
         return out.squeeze(1)  # [B, D]
+
+
+class MultiHeadAttentionPooling(nn.Module):
+    """Multi-query attention pooling: K learnable queries extract K views.
+
+    Addresses the single-query bottleneck where one 128-dim query cannot
+    preserve the information in a 513-token sequence. K queries each
+    extract a different "aspect" of the sequence, then concat + project
+    back to model_dim.
+
+    With K=4: 4x more information preserved through the pooling bottleneck.
+    """
+
+    def __init__(self, dim: int, num_queries: int = 4):
+        super().__init__()
+        self.num_queries = num_queries
+        self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
+        self.attn = nn.MultiheadAttention(dim, num_heads=4, batch_first=True)
+        self.proj = nn.Linear(dim * num_queries, dim)
+
+    def forward(self, x: Tensor, key_padding_mask: Tensor | None = None) -> Tensor:
+        """x: [B, S, D] -> [B, D]"""
+        B = x.shape[0]
+        q = self.queries.expand(B, -1, -1)  # [B, K, D]
+        out, _ = self.attn(q, x, x, key_padding_mask=key_padding_mask, need_weights=False)
+        out = out.reshape(B, -1)  # [B, K*D]
+        return self.proj(out)  # [B, D]
 
 
 class CodeStateEncoder(nn.Module):
@@ -200,18 +227,28 @@ class CodeStateEncoder(nn.Module):
         )
         self.encoder_loops = encoder_loops
 
-        # Readout options
+        # Readout options: attn (single-query), multi_attn (multi-query), cls, mean
         self.pool_mode = os.environ.get("WM_POOL_MODE", "attn")
-        self.attn_pool = AttentionPooling(model_dim) if self.pool_mode == "attn" else None
+        self.num_pool_queries = int(os.environ.get("WM_NUM_POOL_QUERIES", "4"))
+        self.pad_token_id = int(os.environ.get("WM_PAD_TOKEN_ID", "612"))
+        self.mask_padding = os.environ.get("WM_MASK_PADDING", "0") == "1"
+
+        if self.pool_mode == "multi_attn":
+            self.attn_pool = MultiHeadAttentionPooling(model_dim, num_queries=self.num_pool_queries)
+            print(f"[Encoder] MultiHeadAttentionPooling: {self.num_pool_queries} queries")
+        elif self.pool_mode == "attn":
+            self.attn_pool = AttentionPooling(model_dim)
+        else:
+            self.attn_pool = None
 
         self.norm = nn.LayerNorm(model_dim)
 
-    def _readout(self, h: Tensor) -> Tensor:
+    def _readout(self, h: Tensor, pad_mask: Tensor | None = None) -> Tensor:
         """Apply pooling + norm to sequence tensor. h: [B, S+1, D] -> [B, D]."""
         if self.pool_mode == "cls":
             h = h[:, 0]
-        elif self.pool_mode == "attn":
-            h = self.attn_pool(h)
+        elif self.pool_mode in ("attn", "multi_attn"):
+            h = self.attn_pool(h, key_padding_mask=pad_mask)
         else:
             h = h.mean(dim=1)
         return self.norm(h)
@@ -230,6 +267,14 @@ class CodeStateEncoder(nn.Module):
         """
         B = x.shape[0]
 
+        # Build padding mask: True where token is PAD (excluded from attention)
+        # CLS token (prepended) is never masked → prepend False
+        pad_mask: Tensor | None = None
+        if self.mask_padding:
+            token_pad = (x == self.pad_token_id)               # [B, S]
+            cls_mask = torch.zeros(B, 1, dtype=torch.bool, device=x.device)
+            pad_mask = torch.cat([cls_mask, token_pad], dim=1) # [B, S+1]
+
         # Token embedding + CLS prepend
         h = self.embedding(x)                              # [B, S, D]
         cls = self.cls_token.expand(B, -1, -1)              # [B, 1, D]
@@ -246,9 +291,9 @@ class CodeStateEncoder(nn.Module):
             if dense_skip:
                 h = h + h_initial                           # preserve input signal
             if return_intermediates:
-                intermediates.append(self._readout(h))
+                intermediates.append(self._readout(h, pad_mask))
 
-        final = self._readout(h)                            # [B, D]
+        final = self._readout(h, pad_mask)                  # [B, D]
 
         if return_intermediates:
             return final, intermediates
