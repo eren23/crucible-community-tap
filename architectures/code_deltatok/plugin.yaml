@@ -1,0 +1,6 @@
+name: code_deltatok
+type: architectures
+version: "0.1.0"
+description: "DeltaTok-inspired code change tokenizer — compresses frozen backbone deltas into dense tokens"
+author: eren23
+tags: [deltatok, code-changes, frozen-backbone, delta-compression]

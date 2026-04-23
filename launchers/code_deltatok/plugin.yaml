@@ -1,0 +1,6 @@
+name: code_deltatok_launcher
+type: launchers
+version: "0.1.0"
+description: "Training launcher for CodeDeltaTok delta tokenizer"
+author: eren23
+tags: [deltatok, training]
