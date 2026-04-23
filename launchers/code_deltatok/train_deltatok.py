@@ -49,6 +49,8 @@ def main():
     total_steps = int(os.environ.get("CDT_STEPS", "5000"))
     warmup_steps = int(os.environ.get("CDT_WARMUP", "200"))
     grad_clip = float(os.environ.get("CDT_GRAD_CLIP", "0.01"))
+    lambda_contrast = float(os.environ.get("CDT_LAMBDA_CONTRAST", "0.0"))
+    contrast_temp = float(os.environ.get("CDT_CONTRAST_TEMP", "0.07"))
     seed = int(os.environ.get("CDT_SEED", "42"))
     log_interval = int(os.environ.get("CDT_LOG_INTERVAL", "100"))
     save_interval = int(os.environ.get("CDT_SAVE_INTERVAL", "1000"))
@@ -133,6 +135,8 @@ def main():
                 "total_steps": total_steps, "n_params": n_params,
                 "backbone": model_name, "seed": seed,
                 "grad_clip": grad_clip,
+                "lambda_contrast": lambda_contrast,
+                "contrast_temp": contrast_temp,
                 "launcher": "code_deltatok/train_deltatok.py",
             },
         )
@@ -167,7 +171,7 @@ def main():
         nxt = torch.from_numpy(after_features[idx.tolist()]).to(device)
 
         # Forward
-        out = model(prev, nxt)
+        out = model(prev, nxt, lambda_contrast=lambda_contrast, contrast_temp=contrast_temp)
         loss = out["loss"]
 
         # Backward
@@ -183,14 +187,19 @@ def main():
 
         # Log
         if use_wandb and step % 10 == 0:
-            wandb.log({
+            log_dict = {
                 "train/loss": loss_val,
                 "train/recon_cos": out["recon_cos"].item(),
                 "train/delta_eff_rank": out["delta_eff_rank"].item(),
                 "train/raw_cos": out["raw_before_after_cos"].item(),
                 "train/grad_norm": grad_norm.item(),
                 "train/lr": optimizer.param_groups[0]["lr"],
-            }, step=step)
+            }
+            if lambda_contrast > 0:
+                log_dict["train/loss_recon"] = out["loss_recon"].item()
+                log_dict["train/loss_contrast"] = out["loss_contrast"].item()
+                log_dict["train/xmodal_acc"] = out["xmodal_acc"].item()
+            wandb.log(log_dict, step=step)
 
         if step % log_interval == 0:
             # Validation
@@ -199,14 +208,18 @@ def main():
                 v_idx = np.sort(np.random.choice(val_idx, size=min(batch_size, len(val_idx)), replace=False))
                 v_prev = torch.from_numpy(before_features[v_idx.tolist()]).to(device)
                 v_nxt = torch.from_numpy(after_features[v_idx.tolist()]).to(device)
-                v_out = model(v_prev, v_nxt)
+                v_out = model(v_prev, v_nxt, lambda_contrast=lambda_contrast, contrast_temp=contrast_temp)
 
             elapsed = time.time() - start_time
             sps = (step + 1) / elapsed if elapsed > 0 else 0
+            extra = ""
+            if lambda_contrast > 0:
+                extra = (f" c_loss={out['loss_contrast'].item():.3f}"
+                         f" xacc={out['xmodal_acc'].item():.3f}")
             print(
                 f"step {step:5d}/{total_steps} | "
                 f"loss={loss_val:.4f} recon_cos={out['recon_cos'].item():.3f} "
-                f"rank={out['delta_eff_rank'].item():.1f} | "
+                f"rank={out['delta_eff_rank'].item():.1f}{extra} | "
                 f"val_loss={v_out['loss'].item():.4f} val_cos={v_out['recon_cos'].item():.3f} "
                 f"val_rank={v_out['delta_eff_rank'].item():.1f} | "
                 f"best={best_loss:.4f} grad={grad_norm.item():.3f} | {sps:.0f} steps/s"

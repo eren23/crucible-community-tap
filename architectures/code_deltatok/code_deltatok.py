@@ -216,12 +216,16 @@ class CodeDeltaTok(nn.Module):
 
     def forward(
         self, prev_feat: Tensor, next_feat: Tensor,
+        lambda_contrast: float = 0.0,
+        contrast_temp: float = 0.07,
     ) -> dict[str, Tensor]:
         """Full forward: encode delta, decode, compute loss.
 
         Args:
             prev_feat: [B, D] — frozen features of before-state
             next_feat: [B, D] — frozen features of after-state
+            lambda_contrast: weight for CLIP-style contrastive loss
+            contrast_temp: temperature for contrastive softmax
 
         Returns:
             dict with loss, delta_tokens, recon, and diagnostics
@@ -232,13 +236,39 @@ class CodeDeltaTok(nn.Module):
         # Decode → reconstructed next features
         recon = self.decode(delta_tokens, prev_feat)
 
-        # Loss: LogCosh in frozen feature space
-        loss = logcosh_loss(recon, next_feat)
+        # Loss 1: LogCosh reconstruction in frozen feature space
+        loss_recon = logcosh_loss(recon, next_feat)
+
+        # Loss 2: CLIP-style contrastive (delta_token <-> after_feat)
+        # Positive: delta_token[i] matches after_feat[i]
+        # Negative: delta_token[i] vs after_feat[j] for j != i
+        loss_contrast = torch.tensor(0.0, device=prev_feat.device)
+        xmodal_acc = torch.tensor(0.0, device=prev_feat.device)
+        if lambda_contrast > 0 and delta_tokens.shape[0] > 1:
+            # Pool K tokens to single vector
+            dt_pooled = delta_tokens.mean(dim=1)  # [B, D]
+            dt_n = F.normalize(dt_pooled, dim=-1)
+            af_n = F.normalize(next_feat, dim=-1)
+
+            # Similarity matrix [B, B]
+            logits = (dt_n @ af_n.T) / contrast_temp
+            B = logits.shape[0]
+            labels = torch.arange(B, device=logits.device)
+
+            # Symmetric CLIP loss
+            loss_d2a = F.cross_entropy(logits, labels)
+            loss_a2d = F.cross_entropy(logits.T, labels)
+            loss_contrast = (loss_d2a + loss_a2d) / 2
+
+            # Accuracy (how often is the correct match top-1?)
+            with torch.no_grad():
+                xmodal_acc = (logits.argmax(dim=1) == labels).float().mean()
+
+        loss = loss_recon + lambda_contrast * loss_contrast
 
         # Diagnostics
         with torch.no_grad():
             recon_cos = F.cosine_similarity(recon, next_feat, dim=-1).mean()
-            # Delta token effective rank
             dt_flat = delta_tokens.reshape(-1, self.feature_dim)
             if dt_flat.shape[0] > 1:
                 svd = torch.linalg.svdvals(dt_flat - dt_flat.mean(dim=0))
@@ -246,11 +276,13 @@ class CodeDeltaTok(nn.Module):
                 eff_rank = torch.exp(-torch.sum(p * torch.log(p + 1e-8)))
             else:
                 eff_rank = torch.tensor(0.0)
-            # Raw delta baseline (how similar are before/after?)
             raw_cos = F.cosine_similarity(prev_feat, next_feat, dim=-1).mean()
 
         return {
             "loss": loss,
+            "loss_recon": loss_recon,
+            "loss_contrast": loss_contrast,
+            "xmodal_acc": xmodal_acc,
             "delta_tokens": delta_tokens,
             "recon": recon,
             "recon_cos": recon_cos,
