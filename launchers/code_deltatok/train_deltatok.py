@@ -69,6 +69,22 @@ def main():
 
     # ---- Load data ----
     import h5py
+
+    # Auto-download from HuggingFace if local file doesn't exist
+    if not os.path.exists(hdf5_path) and "/" not in hdf5_path:
+        hf_repo = os.environ.get("CDT_HF_REPO", "eren23/codewm-data")
+        hf_path = os.environ.get("CDT_HF_PATH", f"deltatok/{hdf5_path}")
+        print(f"Local file not found, downloading from HF: {hf_repo}/{hf_path}")
+        try:
+            from huggingface_hub import hf_hub_download
+            hdf5_path = hf_hub_download(
+                repo_id=hf_repo, filename=hf_path, repo_type="dataset",
+            )
+            print(f"  Downloaded to: {hdf5_path}")
+        except Exception as e:
+            print(f"ERROR: Failed to download from HF: {e}", file=sys.stderr)
+            sys.exit(1)
+
     print(f"Loading features from {hdf5_path}")
     f = h5py.File(hdf5_path, "r")
     before_features = f["before_features"]  # [N, D]
