@@ -42,8 +42,9 @@ def retrieval_metrics(
     query_reps: np.ndarray,
     gallery_reps: np.ndarray,
     ks: tuple[int, ...] = (1, 5, 10, 50),
+    bootstrap_n: int = 1000,
 ) -> dict[str, float]:
-    """Cosine KNN retrieval. query[i] matches gallery[i]."""
+    """Cosine KNN retrieval with bootstrap CIs. query[i] matches gallery[i]."""
     q_norm = query_reps / (np.linalg.norm(query_reps, axis=1, keepdims=True) + 1e-8)
     g_norm = gallery_reps / (np.linalg.norm(gallery_reps, axis=1, keepdims=True) + 1e-8)
 
@@ -61,6 +62,18 @@ def retrieval_metrics(
         results[f"R@{k}"] = float((ranks <= k).mean())
     results["MRR"] = float((1.0 / ranks).mean())
     results["med_rank"] = float(np.median(ranks))
+
+    # Paired bootstrap 95% CI on MRR
+    if bootstrap_n > 0:
+        rr = 1.0 / ranks  # per-query reciprocal rank
+        boot_mrrs = []
+        for _ in range(bootstrap_n):
+            idx = np.random.choice(nq, size=nq, replace=True)
+            boot_mrrs.append(rr[idx].mean())
+        boot_mrrs = np.array(boot_mrrs)
+        results["MRR_ci_lo"] = float(np.percentile(boot_mrrs, 2.5))
+        results["MRR_ci_hi"] = float(np.percentile(boot_mrrs, 97.5))
+
     return results
 
 
@@ -78,6 +91,7 @@ def eval_method(
     before_feat: np.ndarray | None = None,
     recon_feat: np.ndarray | None = None,
     dims: int = 0,
+    bootstrap_n: int = 1000,
 ) -> dict[str, object]:
     """Run all eval tasks on a delta representation."""
     N = len(delta_reps)
@@ -86,7 +100,7 @@ def eval_method(
     # Task 1: Cross-modal retrieval (delta -> after-state)
     # Only works when delta_reps and after_feat have same dims
     if delta_reps.shape[1] == after_feat.shape[1]:
-        t1 = retrieval_metrics(delta_reps, after_feat)
+        t1 = retrieval_metrics(delta_reps, after_feat, bootstrap_n=bootstrap_n)
         for k, v in t1.items():
             result[f"xmodal_{k}"] = v
     else:
@@ -102,7 +116,7 @@ def eval_method(
 
     # Task 3: Reconstruction retrieval (if available)
     if recon_feat is not None:
-        t3 = retrieval_metrics(recon_feat, after_feat)
+        t3 = retrieval_metrics(recon_feat, after_feat, bootstrap_n=bootstrap_n)
         for k, v in t3.items():
             result[f"recon_{k}"] = v
         # Recon cosine
@@ -189,8 +203,13 @@ def main():
     parser = argparse.ArgumentParser(description="CodeDeltaTok benchmark (proper eval)")
     parser.add_argument("--features", required=True)
     parser.add_argument("--checkpoints", nargs="*", default=[])
-    parser.add_argument("--num-eval", type=int, default=5000)
+    parser.add_argument("--num-eval", type=int, default=5000,
+                        help="Total samples (split: first 20%% query, rest gallery)")
+    parser.add_argument("--num-query", type=int, default=None,
+                        help="Override query count (default: 20%% of num-eval)")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--bootstrap", type=int, default=1000,
+                        help="Bootstrap iterations for CIs (0=skip)")
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -209,7 +228,11 @@ def main():
     before_feat = all_before[perm]
     after_feat = all_after[perm]
     n = len(perm)
-    print(f"  Eval on {n} samples")
+
+    # Split into query + gallery (query[i] matches gallery[i])
+    nq = args.num_query or max(int(n * 0.2), 100)
+    ng = n - nq
+    print(f"  Eval: {nq} queries, {ng} gallery (from {n} samples)")
 
     # Filter zero-norm deltas
     deltas = after_feat - before_feat
@@ -228,7 +251,8 @@ def main():
     print("\n--- Raw Delta (768-dim) ---")
     t0 = time.time()
     raw = get_raw_delta(before_feat, after_feat)
-    r = eval_method("raw_delta_768", raw, after_feat, before_feat, dims=768)
+    bn = args.bootstrap
+    r = eval_method("raw_delta_768", raw, after_feat, before_feat, dims=768, bootstrap_n=bn)
     print(f"  xmodal MRR={r['xmodal_MRR']:.4f} R@1={r['xmodal_R@1']:.4f} R@10={r['xmodal_R@10']:.4f} rank={r['eff_rank']:.0f} ({time.time()-t0:.1f}s)")
     all_results.append(r)
 
@@ -236,7 +260,7 @@ def main():
         print(f"\n--- PCA-{nd} ---")
         t0 = time.time()
         z, recon = get_pca_delta(before_feat, after_feat, nd)
-        r = eval_method(f"pca_{nd}", z, after_feat, before_feat, recon, dims=nd)
+        r = eval_method(f"pca_{nd}", z, after_feat, before_feat, recon, dims=nd, bootstrap_n=bn)
         print(f"  xmodal MRR={r['xmodal_MRR']:.4f} R@1={r['xmodal_R@1']:.4f} R@10={r['xmodal_R@10']:.4f} recon_cos={r.get('recon_cos',0):.3f} rank={r['eff_rank']:.0f} ({time.time()-t0:.1f}s)")
         all_results.append(r)
 
@@ -244,7 +268,7 @@ def main():
         print(f"\n--- Linear AE-{bd} ---")
         t0 = time.time()
         z, recon = get_linear_ae_delta(before_feat, after_feat, bd)
-        r = eval_method(f"linear_ae_{bd}", z, after_feat, before_feat, recon, dims=bd)
+        r = eval_method(f"linear_ae_{bd}", z, after_feat, before_feat, recon, dims=bd, bootstrap_n=bn)
         print(f"  xmodal MRR={r['xmodal_MRR']:.4f} R@1={r['xmodal_R@1']:.4f} R@10={r['xmodal_R@10']:.4f} recon_cos={r.get('recon_cos',0):.3f} rank={r['eff_rank']:.0f} ({time.time()-t0:.1f}s)")
         all_results.append(r)
 
@@ -253,21 +277,28 @@ def main():
         print(f"\n--- DeltaTok: {Path(ckpt).name} ---")
         t0 = time.time()
         z, recon, K, nb = get_deltatok_reps(before_feat, after_feat, ckpt)
-        r = eval_method(f"deltatok_K{K}_{nb}blk", z, after_feat, before_feat, recon, dims=z.shape[1])
+        r = eval_method(f"deltatok_K{K}_{nb}blk", z, after_feat, before_feat, recon, dims=z.shape[1], bootstrap_n=bn)
         print(f"  xmodal MRR={r['xmodal_MRR']:.4f} R@1={r['xmodal_R@1']:.4f} R@10={r['xmodal_R@10']:.4f} recon_cos={r.get('recon_cos',0):.3f} rank={r['eff_rank']:.0f} K={K} ({time.time()-t0:.1f}s)")
         all_results.append(r)
 
     # ---- Summary ----
-    print("\n" + "=" * 100)
-    print(f"{'Method':<25} {'xmodal_MRR':>10} {'xmodal_R@1':>10} {'xmodal_R@10':>11} {'recon_MRR':>10} {'recon_cos':>10} {'rank':>6} {'dims':>5}")
-    print("-" * 100)
+    print("\n" + "=" * 115)
+    print(f"{'Method':<25} {'xmodal_MRR':>10} {'95% CI':>16} {'R@1':>8} {'R@10':>8} {'recon_cos':>10} {'rank':>6} {'dims':>5}")
+    print("-" * 115)
     for r in all_results:
-        recon_mrr = r.get('recon_MRR', '-')
-        recon_cos = r.get('recon_cos', '-')
-        rm = f"{recon_mrr:.4f}" if isinstance(recon_mrr, float) else "-"
-        rc = f"{recon_cos:.3f}" if isinstance(recon_cos, float) else "-"
-        print(f"{r['name']:<25} {r['xmodal_MRR']:>10.4f} {r['xmodal_R@1']:>10.4f} {r['xmodal_R@10']:>11.4f} {rm:>10} {rc:>10} {r['eff_rank']:>6.0f} {r['dims']:>5}")
-    print("=" * 100)
+        mrr = r.get('xmodal_MRR', float('nan'))
+        ci_lo = r.get('xmodal_MRR_ci_lo', float('nan'))
+        ci_hi = r.get('xmodal_MRR_ci_hi', float('nan'))
+        r1 = r.get('xmodal_R@1', float('nan'))
+        r10 = r.get('xmodal_R@10', float('nan'))
+        rc = r.get('recon_cos', '-')
+        rc_s = f"{rc:.3f}" if isinstance(rc, float) else "-"
+        ci_s = f"[{ci_lo:.4f},{ci_hi:.4f}]" if not np.isnan(ci_lo) else "-"
+        mrr_s = f"{mrr:.4f}" if not np.isnan(mrr) else "-"
+        r1_s = f"{r1:.4f}" if not np.isnan(r1) else "-"
+        r10_s = f"{r10:.4f}" if not np.isnan(r10) else "-"
+        print(f"{r['name']:<25} {mrr_s:>10} {ci_s:>16} {r1_s:>8} {r10_s:>8} {rc_s:>10} {r['eff_rank']:>6.0f} {r['dims']:>5}")
+    print("=" * 115)
 
     f.close()
 
