@@ -162,7 +162,7 @@ def main():
         model.train()
 
         # Sample batch
-        idx = np.random.choice(train_idx, size=batch_size, replace=False)
+        idx = np.sort(np.random.choice(train_idx, size=batch_size, replace=False))
         prev = torch.from_numpy(before_features[idx.tolist()]).to(device)
         nxt = torch.from_numpy(after_features[idx.tolist()]).to(device)
 
@@ -196,7 +196,7 @@ def main():
             # Validation
             model.eval()
             with torch.no_grad():
-                v_idx = np.random.choice(val_idx, size=min(batch_size, len(val_idx)), replace=False)
+                v_idx = np.sort(np.random.choice(val_idx, size=min(batch_size, len(val_idx)), replace=False))
                 v_prev = torch.from_numpy(before_features[v_idx.tolist()]).to(device)
                 v_nxt = torch.from_numpy(after_features[v_idx.tolist()]).to(device)
                 v_out = model(v_prev, v_nxt)
