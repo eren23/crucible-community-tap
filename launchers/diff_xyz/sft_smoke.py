@@ -173,6 +173,12 @@ def main() -> int:
         print("[sft_smoke] FAIL no training data", file=sys.stderr, flush=True)
         return 3
 
+    # Truncate long examples at the tokenizer level so the SFTConfig surface
+    # stays version-agnostic (TRL renames its sequence-length kwarg every
+    # other release: max_seq_length → max_length → moved to dataset_kwargs).
+    if tokenizer.model_max_length is None or tokenizer.model_max_length > 2048:
+        tokenizer.model_max_length = 2048
+
     ds = Dataset.from_list(examples)
     sft_cfg = SFTConfig(
         output_dir=str(ckpt_dir),
@@ -181,7 +187,6 @@ def main() -> int:
         gradient_accumulation_steps=grad_accum,
         learning_rate=lr,
         warmup_ratio=0.03,
-        max_seq_length=2048,
         bf16=True,
         logging_steps=10,
         save_steps=max(50, max_steps // 2),
