@@ -349,22 +349,27 @@ class HFBackend:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        inputs = self._tokenizer.apply_chat_template(
+        # Newer transformers returns a BatchEncoding from apply_chat_template
+        # (rather than a bare tensor). Render to text and tokenize explicitly so
+        # we control the shape passed to generate().
+        text = self._tokenizer.apply_chat_template(
             messages,
             add_generation_prompt=True,
-            return_tensors="pt",
-        ).to(self._model.device)
+            tokenize=False,
+        )
+        encoded = self._tokenizer(text, return_tensors="pt").to(self._model.device)
+        prompt_len = encoded["input_ids"].shape[-1]
 
         do_sample = temperature > 0.0
         with torch.inference_mode():
             outputs = self._model.generate(
-                inputs,
+                **encoded,
                 max_new_tokens=max_tokens,
                 do_sample=do_sample,
                 temperature=temperature if do_sample else 1.0,
                 pad_token_id=self._tokenizer.pad_token_id,
             )
-        generated = outputs[0][inputs.shape[-1]:]
+        generated = outputs[0][prompt_len:]
         return self._tokenizer.decode(generated, skip_special_tokens=True)
 
 
