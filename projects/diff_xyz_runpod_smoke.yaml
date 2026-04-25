@@ -1,0 +1,155 @@
+name: diff_xyz_runpod_smoke
+description: |
+  Diff-XYZ smoke loop on a single RTX 4090 spot pod.
+
+  Two variants:
+    - api_smoke   — runs the harness against an external API (default
+                    openai:gpt-4.1-mini, Apply task, udiff format, 20 samples).
+                    Validates the harness end-to-end without GPU work; pod
+                    GPU is unused but provisioning + bootstrap + log capture
+                    are still exercised. ~$0.03 per iteration.
+    - sft_smoke   — fine-tunes Qwen2.5-Coder-1.5B-Instruct in 4-bit + LoRA on
+                    ~200 CommitPackFT-python commits (deduped vs Diff-XYZ test),
+                    100 steps, then evaluates on 30 Python Diff-XYZ samples.
+                    Tight enough to fit a 4090 24GB. ~$0.05 per iteration,
+                    ~5 min wall.
+
+  Usage:
+    crucible run_project diff_xyz_runpod_smoke --variant api_smoke
+    crucible run_project diff_xyz_runpod_smoke --variant sft_smoke
+
+repo: "https://github.com/eren23/crucible-community-tap"
+branch: main
+shallow: true
+workspace: "/workspace/project"
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  gpu_count: 1
+  container_disk: 60          # extra room for HF cache + dataset shards
+  volume_disk: 0
+  interruptible: true         # spot — fine for smokes
+
+python: "3.10"
+
+# Torch matches a CUDA 12.1 base image which RunPod's RTX 4090 templates
+# typically ship with. Override at runtime via env_set if your image differs.
+install_torch: "torch==2.4.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu121"
+
+install:
+  - "transformers>=4.50"
+  - "accelerate>=0.30"
+  - "bitsandbytes>=0.43"
+  - "peft>=0.11"
+  - "trl>=0.9"
+  - "datasets>=2.18"
+  - "huggingface_hub"
+  - "wandb"
+  - "openai>=1.40"
+  - "anthropic>=0.30"
+  - "google-generativeai"
+
+# Pick the launcher based on DIFFXYZ_RUNNER env, set per-variant below.
+# Default 'api_smoke' lets a no-variant `crucible run_project` still run.
+train: >-
+  cd /workspace/project &&
+  python3 -u launchers/diff_xyz/${DIFFXYZ_RUNNER:-api_smoke}.py
+
+# Smokes are short by design; cap at 30 min so a stuck run gets killed.
+timeout: 1800
+
+# Forward whatever keys exist on the host. The runner will only consume the
+# ones it needs, so it's harmless to forward everything.
+env_forward:
+  - OPENAI_API_KEY
+  - ANTHROPIC_API_KEY
+  - GOOGLE_API_KEY
+  - HF_TOKEN
+  - HUGGINGFACE_HUB_TOKEN
+  - WANDB_API_KEY
+
+env_set:
+  PYTHONUNBUFFERED: "1"
+  HF_HUB_ENABLE_HF_TRANSFER: "1"     # fast HF downloads
+  TOKENIZERS_PARALLELISM: "false"
+
+metrics:
+  source: "stdout"
+  primary: "EM"
+  direction: "maximize"
+
+variants:
+  # ──────────────────────────────────────────────────────────────────────
+  # API smoke — fastest iteration. Uses OpenAI / Anthropic / Google keys.
+  # ──────────────────────────────────────────────────────────────────────
+  api_smoke:
+    DIFFXYZ_RUNNER: "api_smoke"
+    DIFFXYZ_MODEL: "openai:gpt-4.1-mini"
+    DIFFXYZ_TASK: "apply"
+    DIFFXYZ_FORMAT: "udiff"
+    DIFFXYZ_SYSTEM: "format"
+    DIFFXYZ_LIMIT: "20"
+    DIFFXYZ_SEED: "0"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+
+  # Same contract, different model — verifies Anthropic adapter.
+  api_smoke_claude:
+    DIFFXYZ_RUNNER: "api_smoke"
+    DIFFXYZ_MODEL: "anthropic:claude-haiku-4-5-20251001"
+    DIFFXYZ_TASK: "apply"
+    DIFFXYZ_FORMAT: "udiff"
+    DIFFXYZ_SYSTEM: "format"
+    DIFFXYZ_LIMIT: "20"
+    DIFFXYZ_SEED: "0"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+
+  # Diff-Gen variant — different metric path (parsing/applying rates + F1).
+  api_smoke_diffgen:
+    DIFFXYZ_RUNNER: "api_smoke"
+    DIFFXYZ_MODEL: "openai:gpt-4.1-mini"
+    DIFFXYZ_TASK: "diff_gen"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_SYSTEM: "format"
+    DIFFXYZ_LIMIT: "20"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # SFT smoke — Qwen2.5-Coder-1.5B + LoRA on a 4090. ~5 min.
+  # Tunable via WM_-style env overrides if you want a longer run.
+  # ──────────────────────────────────────────────────────────────────────
+  sft_smoke:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "200"
+    DIFFXYZ_MAX_STEPS: "100"
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "4"
+    DIFFXYZ_LR: "2e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "30"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_PROJECT: "crucible-diff-xyz-smoke"
+    WANDB_RUN_NAME: "sft-smoke-qwen-1p5b"
+
+  # SFT smoke at a slightly bigger size — Qwen2.5-Coder-7B in 4-bit, still
+  # fits 24GB but tighter. Use this once 1.5B variant works end-to-end.
+  sft_smoke_7b:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-7B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "200"
+    DIFFXYZ_MAX_STEPS: "100"
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "8"
+    DIFFXYZ_LR: "1e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "30"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_PROJECT: "crucible-diff-xyz-smoke"
+    WANDB_RUN_NAME: "sft-smoke-qwen-7b"

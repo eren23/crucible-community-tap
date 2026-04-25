@@ -1,0 +1,6 @@
+name: diff_xyz_launcher
+type: launchers
+version: "0.1.0"
+description: "Diff-XYZ smoke launchers — api_smoke (LLM-API eval) and sft_smoke (Qwen LoRA fine-tune + post-eval). Reads env DIFFXYZ_RUNNER, DIFFXYZ_MODEL, etc."
+author: eren23
+tags: [diff-xyz, code-diff, llm-eval, sft, qwen]
