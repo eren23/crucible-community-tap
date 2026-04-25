@@ -128,7 +128,10 @@ def main() -> int:
 
     # ---- 3. Stream CommitPackFT-python, dedup, build SFT examples ----
     print("[sft_smoke] streaming CommitPackFT/python...", flush=True)
-    raw = load_dataset("bigcode/commitpackft", "python", split="train", streaming=True)
+    raw = load_dataset(
+        "bigcode/commitpackft", "python", split="train",
+        streaming=True, trust_remote_code=True,
+    )
     examples: list[dict] = []
     skipped = 0
     for row in raw:

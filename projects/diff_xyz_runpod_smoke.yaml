@@ -26,16 +26,16 @@ workspace: "/workspace/project"
 pod:
   gpu_type: "NVIDIA GeForce RTX 4090"
   gpu_count: 1
-  container_disk: 60          # extra room for HF cache + dataset shards
-  volume_disk: 0
+  container_disk: 40          # base CUDA image + a bit of headroom
+  volume_disk: 40             # RunPod requires volume_disk >= container_disk
   interruptible: true         # spot — fine for smokes
 
 python: "3.10"
 
-# Torch matches a CUDA 12.1 base image which RunPod's RTX 4090 templates
-# typically ship with. Override at runtime via env_set if your image differs.
-install_torch: "torch==2.4.0"
-install_flags: "--index-url https://download.pytorch.org/whl/cu121"
+# transformers >=4.50 uses nn.Module.set_submodule which lands in torch 2.5+.
+# RunPod's CUDA 12.4+ images ship with torch 2.5 by default, so the pin works.
+install_torch: "torch>=2.5,<2.7"
+install_flags: "--index-url https://download.pytorch.org/whl/cu124"
 
 install:
   - "transformers>=4.50"
@@ -43,7 +43,9 @@ install:
   - "bitsandbytes>=0.43"
   - "peft>=0.11"
   - "trl>=0.9"
-  - "datasets>=2.18"
+  # Pin <3.0: bigcode/commitpackft still ships a Python-script loader which
+  # datasets dropped support for in 3.x.
+  - "datasets>=2.18,<3.0"
   - "huggingface_hub"
   - "wandb"
   - "openai>=1.40"
@@ -59,15 +61,15 @@ train: >-
 # Smokes are short by design; cap at 30 min so a stuck run gets killed.
 timeout: 1800
 
-# Forward whatever keys exist on the host. The runner will only consume the
-# ones it needs, so it's harmless to forward everything.
+# Crucible's env_forward denylist blocks RUNPOD_API_KEY, OPENAI_API_KEY,
+# ANTHROPIC_API_KEY, HF_TOKEN, AWS_SECRET_ACCESS_KEY, GCP_SERVICE_ACCOUNT_KEY,
+# SSH_PRIVATE_KEY (security guard). Put any of those keys in `.env.runpod.local`
+# instead — that file is synced verbatim to the pod's workspace.
+# Forward only allow-listed keys here.
 env_forward:
-  - OPENAI_API_KEY
-  - ANTHROPIC_API_KEY
-  - GOOGLE_API_KEY
-  - HF_TOKEN
   - HUGGINGFACE_HUB_TOKEN
   - WANDB_API_KEY
+  - GOOGLE_API_KEY
 
 env_set:
   PYTHONUNBUFFERED: "1"
