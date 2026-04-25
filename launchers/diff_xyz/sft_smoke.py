@@ -65,7 +65,7 @@ def main() -> int:
     grad_accum = int(os.environ.get("DIFFXYZ_GRAD_ACCUM", "4"))
     lr = float(os.environ.get("DIFFXYZ_LR", "2e-5"))
     lora_r = int(os.environ.get("DIFFXYZ_LORA_R", "32"))
-    eval_limit = int(os.environ.get("DIFFXYZ_EVAL_LIMIT", "30"))
+    eval_limit = int(os.environ.get("DIFFXYZ_EVAL_LIMIT", "10"))
     eval_lang = os.environ.get("DIFFXYZ_EVAL_LANG", "python")
     fmt = os.environ.get("DIFFXYZ_FORMAT", "search-replace")
     out_path = Path(os.environ.get("DIFFXYZ_OUT", "/workspace/project/result.json"))
@@ -209,16 +209,29 @@ def main() -> int:
     # ---- 5. Post-training eval ----
     gc.collect()
     torch.cuda.empty_cache()
-    print(f"[sft_smoke] eval on {eval_limit} Diff-XYZ samples ({eval_lang})...", flush=True)
+    # Critical: training left gradient_checkpointing on, which disables KV
+    # cache during generate() and slows token generation by ~10x. Re-enable
+    # cache before eval.
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    if hasattr(model, "config"):
+        model.config.use_cache = True
+
+    eval_max_tokens = int(os.environ.get("DIFFXYZ_EVAL_MAX_TOKENS", "512"))
+    print(f"[sft_smoke] eval on {eval_limit} Diff-XYZ samples ({eval_lang}) "
+          f"with max_new_tokens={eval_max_tokens}...", flush=True)
     eval_samples = load_samples(limit=eval_limit, langs=[eval_lang], seed=seed)
     backend = HFBackend(model_id=base_model)
     backend._model = model
     backend._tokenizer = tokenizer
     rows = []
     for i, sample in enumerate(eval_samples):
+        t1 = time.time()
         r = score_sample(backend, sample, idx=i, task="apply", fmt=fmt,
-                         sys_mode="format", max_tokens=2048, temperature=0.0)
+                         sys_mode="format", max_tokens=eval_max_tokens, temperature=0.0)
         rows.append(r)
+        print(f"[sft_smoke] eval[{i+1}/{len(eval_samples)}] em={r.em:.2f} "
+              f"iou={r.iou:.2f} t={time.time()-t1:.1f}s", flush=True)
     em = statistics.fmean([r.em for r in rows]) if rows else 0.0
     iou = statistics.fmean([r.iou for r in rows]) if rows else 0.0
 
