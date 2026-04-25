@@ -75,6 +75,9 @@ env_set:
   PYTHONUNBUFFERED: "1"
   HF_HUB_ENABLE_HF_TRANSFER: "1"     # fast HF downloads
   TOKENIZERS_PARALLELISM: "false"
+  # Single W&B project for all Diff-XYZ work — variants distinguish runs
+  # via WANDB_RUN_NAME below (per crucible.yaml W&B best practice).
+  WANDB_PROJECT: "crucible-diff-xyz"
 
 metrics:
   source: "stdout"
@@ -135,7 +138,6 @@ variants:
     DIFFXYZ_FORMAT: "search-replace"
     DIFFXYZ_OUT: "/workspace/project/result.json"
     DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
-    WANDB_PROJECT: "crucible-diff-xyz-smoke"
     WANDB_RUN_NAME: "sft-smoke-qwen-1p5b"
 
   # SFT smoke at a slightly bigger size — Qwen2.5-Coder-7B in 4-bit, still
@@ -155,5 +157,4 @@ variants:
     DIFFXYZ_FORMAT: "search-replace"
     DIFFXYZ_OUT: "/workspace/project/result.json"
     DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
-    WANDB_PROJECT: "crucible-diff-xyz-smoke"
     WANDB_RUN_NAME: "sft-smoke-qwen-7b"
