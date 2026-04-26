@@ -72,6 +72,11 @@ class SampleResult:
     response_chars: int
     elapsed_s: float
     error: str = ""
+    # Raw model output and gold reference, kept verbatim so that runs are
+    # diagnosable / re-scorable offline (e.g. trying a different EM
+    # comparator) without needing to spin the pod back up.
+    predicted: str = ""
+    reference: str = ""
 
 
 def score_sample(
@@ -111,6 +116,7 @@ def score_sample(
             em=m.em, iou=m.iou,
             parsing_rate=0.0, applying_rate=0.0, f1_plus=0.0, f1_minus=0.0,
             response_chars=len(cleaned), elapsed_s=elapsed,
+            predicted=cleaned, reference=sample.new_code,
         )
     if task == "anti_apply":
         m = compute_apply_metrics(cleaned, sample.old_code)
@@ -119,6 +125,7 @@ def score_sample(
             em=m.em, iou=m.iou,
             parsing_rate=0.0, applying_rate=0.0, f1_plus=0.0, f1_minus=0.0,
             response_chars=len(cleaned), elapsed_s=elapsed,
+            predicted=cleaned, reference=sample.old_code,
         )
     if task == "diff_gen":
         m = compute_diff_gen_metrics(
@@ -134,6 +141,7 @@ def score_sample(
             parsing_rate=m.parsing_rate, applying_rate=m.applying_rate,
             f1_plus=m.f1_plus, f1_minus=m.f1_minus,
             response_chars=len(cleaned), elapsed_s=elapsed,
+            predicted=cleaned, reference=sample.diff_for(fmt),
         )
     raise ValueError(f"unknown task {task!r}")
 

@@ -27,6 +27,7 @@ Stdout: prints ``RESULT EM=<float> IoU=<float>`` on the last line for Crucible.
 """
 from __future__ import annotations
 
+import base64
 import difflib
 import gc
 import json
@@ -68,6 +69,14 @@ def main() -> int:
     eval_limit = int(os.environ.get("DIFFXYZ_EVAL_LIMIT", "10"))
     eval_lang = os.environ.get("DIFFXYZ_EVAL_LANG", "python")
     eval_task = os.environ.get("DIFFXYZ_EVAL_TASK", "apply")  # apply | anti_apply | diff_gen
+    # Comma-separated subset of {apply, anti_apply, diff_gen} to include in
+    # training. Empty/unset = all three (multi-task). Use "diff_gen" alone to
+    # avoid multi-task dilution when chasing Diff-Gen EM.
+    train_tasks = tuple(
+        t.strip() for t in os.environ.get(
+            "DIFFXYZ_TASK_FILTER", "apply,anti_apply,diff_gen"
+        ).split(",") if t.strip()
+    )
     fmt = os.environ.get("DIFFXYZ_FORMAT", "search-replace")
     # Default save_steps to a huge number so the trainer never saves mid-run
     # (mid-run saves intermittently hang on flaky pods at the 4-bit + LoRA +
@@ -79,7 +88,8 @@ def main() -> int:
 
     print(f"[sft_smoke] base={base_model}  train_commits={limit_train}  "
           f"steps={max_steps}  fmt={fmt}  eval_task={eval_task}  "
-          f"eval_lang={eval_lang}  save_steps={save_steps}", flush=True)
+          f"eval_lang={eval_lang}  save_steps={save_steps}  "
+          f"train_tasks={train_tasks}", flush=True)
 
     # ---- imports here (need torch + transformers + trl) ----
     import torch  # type: ignore[import-not-found]
@@ -140,8 +150,10 @@ def main() -> int:
     )
     examples: list[dict] = []
     skipped = 0
+    examples_per_commit = len(train_tasks)
+    target_examples = limit_train * examples_per_commit
     for row in raw:
-        if len(examples) >= limit_train * 3:  # 3 tasks per commit
+        if len(examples) >= target_examples:
             break
         old = row.get("old_contents") or ""
         new = row.get("new_contents") or ""
@@ -161,11 +173,11 @@ def main() -> int:
             udiff="", udiff_h="", udiff_l="", search_replace=sr,
             n_added=0, n_removed=0, n_hunks=0, change_kind="",
         )
-        for task, target in (
-            ("apply", new),
-            ("anti_apply", old),
-            ("diff_gen", sr),
-        ):
+        task_targets = {"apply": new, "anti_apply": old, "diff_gen": sr}
+        for task in train_tasks:
+            target = task_targets.get(task)
+            if target is None:
+                continue
             sys_p = system_prompt(fmt, "format")
             usr_p = user_prompt(task, fmt, sample)
             examples.append({"messages": [
@@ -255,7 +267,7 @@ def main() -> int:
         metrics["applying_rate"] = statistics.fmean([r.applying_rate for r in rows]) if rows else 0.0
         metrics["f1_plus"] = statistics.fmean([r.f1_plus for r in rows]) if rows else 0.0
         metrics["f1_minus"] = statistics.fmean([r.f1_minus for r in rows]) if rows else 0.0
-    out_path.write_text(json.dumps({
+    payload = {
         "base_model": base_model,
         "limit_train": limit_train,
         "max_steps": max_steps,
@@ -263,16 +275,32 @@ def main() -> int:
         "eval_task": eval_task,
         "eval_lang": eval_lang,
         "eval_limit": eval_limit,
+        "train_tasks": list(train_tasks),
         "metrics": metrics,
         "per_sample": [
             {"idx": r.idx, "em": r.em, "iou": r.iou, "lang": r.lang,
              "parsing_rate": r.parsing_rate, "applying_rate": r.applying_rate,
              "f1_plus": r.f1_plus, "f1_minus": r.f1_minus,
-             "elapsed_s": r.elapsed_s, "error": r.error}
+             "elapsed_s": r.elapsed_s, "error": r.error,
+             "predicted": r.predicted, "reference": r.reference}
             for r in rows
         ],
-    }, indent=2), encoding="utf-8")
+    }
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"[sft_smoke] wrote {out_path}", flush=True)
+    # Self-archive into the run log so we can re-score offline even after the
+    # pod is destroyed. base64 keeps the JSON intact through any line-mangling
+    # log-collection pipeline. Pulled out via:
+    #   awk '/^RESULT_JSON_B64_BEGIN/{flag=1;next}/^RESULT_JSON_B64_END/{flag=0}flag' \
+    #     <log> | base64 -d > result.json
+    blob = base64.b64encode(
+        json.dumps(payload).encode("utf-8")
+    ).decode("ascii")
+    print("RESULT_JSON_B64_BEGIN", flush=True)
+    # Wrap at 76 chars so logs stay reasonable in editors.
+    for chunk in (blob[i:i + 76] for i in range(0, len(blob), 76)):
+        print(chunk, flush=True)
+    print("RESULT_JSON_B64_END", flush=True)
     print(f"RESULT EM={em:.4f} IoU={iou:.4f}", flush=True)
     return 0
 

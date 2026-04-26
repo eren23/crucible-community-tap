@@ -202,3 +202,51 @@ variants:
     DIFFXYZ_OUT: "/workspace/project/result.json"
     DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
     WANDB_RUN_NAME: "qwen2p5-7b-diffgen-300step-2k"
+
+  # Single-task Diff-Gen SFT (no Apply / Anti-Apply mixing). Tests the
+  # multi-task-dilution hypothesis from Run D (EM 0.00 with full mix). Same
+  # 7B / 300 steps / 2k commits config — the only knob changed is
+  # DIFFXYZ_TASK_FILTER. Train data is now 2000 examples, not 6000, so
+  # effective gradient updates per Diff-Gen example go up 3x.
+  sft_smoke_7b_diffgen_solo:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-7B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "2000"
+    DIFFXYZ_MAX_STEPS: "300"
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "8"
+    DIFFXYZ_LR: "1e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "20"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_EVAL_TASK: "diff_gen"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_SAVE_STEPS: "999999"
+    DIFFXYZ_TASK_FILTER: "diff_gen"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_RUN_NAME: "qwen2p5-7b-diffgen-solo-300step-2k"
+
+  # 1.5B sibling — fast (~5 min) cross-check before committing the 30-min
+  # 7B run. If 1.5B-solo lifts EM above its 1.5B-multitask baseline, the
+  # multi-task dilution hypothesis is on solid ground.
+  sft_smoke_diffgen_solo:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "2000"
+    DIFFXYZ_MAX_STEPS: "300"
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "4"
+    DIFFXYZ_LR: "2e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "20"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_EVAL_TASK: "diff_gen"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_SAVE_STEPS: "999999"
+    DIFFXYZ_TASK_FILTER: "diff_gen"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_RUN_NAME: "qwen2p5-1p5b-diffgen-solo-300step-2k"
