@@ -67,13 +67,19 @@ def main() -> int:
     lora_r = int(os.environ.get("DIFFXYZ_LORA_R", "32"))
     eval_limit = int(os.environ.get("DIFFXYZ_EVAL_LIMIT", "10"))
     eval_lang = os.environ.get("DIFFXYZ_EVAL_LANG", "python")
+    eval_task = os.environ.get("DIFFXYZ_EVAL_TASK", "apply")  # apply | anti_apply | diff_gen
     fmt = os.environ.get("DIFFXYZ_FORMAT", "search-replace")
+    # Default save_steps to a huge number so the trainer never saves mid-run
+    # (mid-run saves intermittently hang on flaky pods at the 4-bit + LoRA +
+    # gradient-checkpointing intersection — observed on at least one run).
+    save_steps = int(os.environ.get("DIFFXYZ_SAVE_STEPS", "999999"))
     out_path = Path(os.environ.get("DIFFXYZ_OUT", "/workspace/project/result.json"))
     ckpt_dir = Path(os.environ.get("DIFFXYZ_CKPT_DIR", "/workspace/project/ckpts"))
     seed = int(os.environ.get("DIFFXYZ_SEED", "42"))
 
     print(f"[sft_smoke] base={base_model}  train_commits={limit_train}  "
-          f"steps={max_steps}  fmt={fmt}  eval_lang={eval_lang}", flush=True)
+          f"steps={max_steps}  fmt={fmt}  eval_task={eval_task}  "
+          f"eval_lang={eval_lang}  save_steps={save_steps}", flush=True)
 
     # ---- imports here (need torch + transformers + trl) ----
     import torch  # type: ignore[import-not-found]
@@ -189,7 +195,7 @@ def main() -> int:
         warmup_ratio=0.03,
         bf16=True,
         logging_steps=10,
-        save_steps=max(50, max_steps // 2),
+        save_steps=save_steps,
         save_total_limit=1,
         seed=seed,
         report_to=["wandb"] if os.environ.get("WANDB_API_KEY") else ["none"],
@@ -218,8 +224,8 @@ def main() -> int:
         model.config.use_cache = True
 
     eval_max_tokens = int(os.environ.get("DIFFXYZ_EVAL_MAX_TOKENS", "512"))
-    print(f"[sft_smoke] eval on {eval_limit} Diff-XYZ samples ({eval_lang}) "
-          f"with max_new_tokens={eval_max_tokens}...", flush=True)
+    print(f"[sft_smoke] eval task={eval_task} on {eval_limit} Diff-XYZ samples "
+          f"({eval_lang}) with max_new_tokens={eval_max_tokens}...", flush=True)
     eval_samples = load_samples(limit=eval_limit, langs=[eval_lang], seed=seed)
     backend = HFBackend(model_id=base_model)
     backend._model = model
@@ -227,25 +233,41 @@ def main() -> int:
     rows = []
     for i, sample in enumerate(eval_samples):
         t1 = time.time()
-        r = score_sample(backend, sample, idx=i, task="apply", fmt=fmt,
+        r = score_sample(backend, sample, idx=i, task=eval_task, fmt=fmt,
                          sys_mode="format", max_tokens=eval_max_tokens, temperature=0.0)
         rows.append(r)
-        print(f"[sft_smoke] eval[{i+1}/{len(eval_samples)}] em={r.em:.2f} "
-              f"iou={r.iou:.2f} t={time.time()-t1:.1f}s", flush=True)
+        # Diff-Gen carries extra metrics worth printing per-sample.
+        if eval_task == "diff_gen":
+            print(f"[sft_smoke] eval[{i+1}/{len(eval_samples)}] em={r.em:.2f} "
+                  f"iou={r.iou:.2f} parse={r.parsing_rate:.0f} apply={r.applying_rate:.0f} "
+                  f"f1+={r.f1_plus:.2f} f1-={r.f1_minus:.2f} t={time.time()-t1:.1f}s",
+                  flush=True)
+        else:
+            print(f"[sft_smoke] eval[{i+1}/{len(eval_samples)}] em={r.em:.2f} "
+                  f"iou={r.iou:.2f} t={time.time()-t1:.1f}s", flush=True)
     em = statistics.fmean([r.em for r in rows]) if rows else 0.0
     iou = statistics.fmean([r.iou for r in rows]) if rows else 0.0
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics: dict = {"EM": em, "IoU": iou, "n": len(rows)}
+    if eval_task == "diff_gen":
+        metrics["parsing_rate"] = statistics.fmean([r.parsing_rate for r in rows]) if rows else 0.0
+        metrics["applying_rate"] = statistics.fmean([r.applying_rate for r in rows]) if rows else 0.0
+        metrics["f1_plus"] = statistics.fmean([r.f1_plus for r in rows]) if rows else 0.0
+        metrics["f1_minus"] = statistics.fmean([r.f1_minus for r in rows]) if rows else 0.0
     out_path.write_text(json.dumps({
         "base_model": base_model,
         "limit_train": limit_train,
         "max_steps": max_steps,
         "fmt": fmt,
+        "eval_task": eval_task,
         "eval_lang": eval_lang,
         "eval_limit": eval_limit,
-        "metrics": {"EM": em, "IoU": iou, "n": len(rows)},
+        "metrics": metrics,
         "per_sample": [
             {"idx": r.idx, "em": r.em, "iou": r.iou, "lang": r.lang,
+             "parsing_rate": r.parsing_rate, "applying_rate": r.applying_rate,
+             "f1_plus": r.f1_plus, "f1_minus": r.f1_minus,
              "elapsed_s": r.elapsed_s, "error": r.error}
             for r in rows
         ],

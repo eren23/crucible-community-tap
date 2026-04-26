@@ -158,3 +158,47 @@ variants:
     DIFFXYZ_OUT: "/workspace/project/result.json"
     DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
     WANDB_RUN_NAME: "sft-smoke-qwen-7b"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Diff-Gen variants — same SFT recipe, eval task = diff_gen instead of
+  # apply. Diff-Gen is the only Diff-XYZ task with real headroom for
+  # open-source SFT (Apply is nearly saturated by frontier; Diff-Gen base
+  # numbers are well below frontier even at 7B). Paper baseline 7B
+  # search-replace Diff-Gen: EM 0.68. We're chasing > that.
+  sft_smoke_diffgen:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "2000"
+    DIFFXYZ_MAX_STEPS: "300"      # below the 250-step save-boundary stall
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "4"
+    DIFFXYZ_LR: "2e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "20"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_EVAL_TASK: "diff_gen"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_SAVE_STEPS: "999999"  # never save mid-run
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_RUN_NAME: "qwen2p5-1p5b-diffgen-300step-2k"
+
+  sft_smoke_7b_diffgen:
+    DIFFXYZ_RUNNER: "sft_smoke"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-7B-Instruct"
+    DIFFXYZ_LIMIT_TRAIN: "2000"
+    DIFFXYZ_MAX_STEPS: "300"
+    DIFFXYZ_BATCH: "1"
+    DIFFXYZ_GRAD_ACCUM: "8"
+    DIFFXYZ_LR: "1e-5"
+    DIFFXYZ_LORA_R: "32"
+    DIFFXYZ_EVAL_LIMIT: "20"
+    DIFFXYZ_EVAL_LANG: "python"
+    DIFFXYZ_EVAL_TASK: "diff_gen"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_SAVE_STEPS: "999999"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    DIFFXYZ_CKPT_DIR: "/workspace/project/ckpts"
+    WANDB_RUN_NAME: "qwen2p5-7b-diffgen-300step-2k"
