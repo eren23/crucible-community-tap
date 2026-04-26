@@ -58,7 +58,39 @@ def _build_search_replace(old: str, new: str) -> str:
     return "\n".join(blocks)
 
 
+def _load_env_file_if_present() -> None:
+    """Load `.env` from the workspace if present.
+
+    Crucible's env_forward denylist blocks HF_TOKEN / OPENAI_API_KEY / etc.
+    from being passed into the launcher's process env. Those secrets do get
+    rsynced as a `.env` file in the workspace, but no one auto-loads them.
+    Newer `huggingface_hub` reads `HF_TOKEN`; without it 7B+ shards stall on
+    unauthenticated rate-limit retries. Read once, set os.environ.
+    """
+    candidates = [
+        Path("/workspace/project/.env"),
+        Path.cwd() / ".env",
+    ]
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+        except OSError:
+            continue
+        return
+
+
 def main() -> int:
+    _load_env_file_if_present()
     base_model = os.environ.get("DIFFXYZ_BASE_MODEL", "Qwen/Qwen2.5-Coder-1.5B-Instruct")
     limit_train = int(os.environ.get("DIFFXYZ_LIMIT_TRAIN", "200"))
     max_steps = int(os.environ.get("DIFFXYZ_MAX_STEPS", "100"))
