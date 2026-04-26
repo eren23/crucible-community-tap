@@ -289,6 +289,22 @@ def main() -> int:
         else:
             print(f"[sft_smoke] eval[{i+1}/{len(eval_samples)}] em={r.em:.2f} "
                   f"iou={r.iou:.2f} t={time.time()-t1:.1f}s", flush=True)
+        # Live divergence diagnostic — see eval_only.py for rationale.
+        if r.em == 0.0 and r.applying_rate == 1.0 and r.predicted and r.reference:
+            p = [ln for ln in r.predicted.splitlines() if ln.strip()]
+            ref = [ln for ln in r.reference.splitlines() if ln.strip()]
+            diff_idx = None
+            for k in range(min(len(p), len(ref))):
+                if p[k] != ref[k]:
+                    diff_idx = k
+                    break
+            if diff_idx is None and len(p) != len(ref):
+                diff_idx = min(len(p), len(ref))
+            if diff_idx is not None:
+                pred_line = (p[diff_idx] if diff_idx < len(p) else "<EOF>")[:80]
+                ref_line = (ref[diff_idx] if diff_idx < len(ref) else "<EOF>")[:80]
+                print(f"[diag][{i}] first_diff line={diff_idx} "
+                      f"pred={pred_line!r} ref={ref_line!r}", flush=True)
     em = statistics.fmean([r.em for r in rows]) if rows else 0.0
     iou = statistics.fmean([r.iou for r in rows]) if rows else 0.0
 

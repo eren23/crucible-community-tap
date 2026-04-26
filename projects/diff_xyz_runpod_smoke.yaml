@@ -208,6 +208,34 @@ variants:
   # 7B / 300 steps / 2k commits config — the only knob changed is
   # DIFFXYZ_TASK_FILTER. Train data is now 2000 examples, not 6000, so
   # effective gradient updates per Diff-Gen example go up 3x.
+  # ──────────────────────────────────────────────────────────────────────
+  # Zero-shot eval (no SFT). Loads a base HF model in 4-bit and runs the
+  # Diff-XYZ harness directly. Anchors our pipeline against paper Table 5
+  # (Qwen2.5-Coder-7B Diff-Gen search-replace EM=0.68). Without this
+  # baseline we can't tell SFT regressions from eval-pipeline drift.
+  # ──────────────────────────────────────────────────────────────────────
+  eval_only_7b_diffgen:
+    DIFFXYZ_RUNNER: "eval_only"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-7B-Instruct"
+    DIFFXYZ_TASK: "diff_gen"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_LIMIT: "20"
+    DIFFXYZ_LANG: "python"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    WANDB_RUN_NAME: "qwen2p5-7b-diffgen-zero-shot"
+
+  eval_only_1p5b_diffgen:
+    DIFFXYZ_RUNNER: "eval_only"
+    DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    DIFFXYZ_TASK: "diff_gen"
+    DIFFXYZ_FORMAT: "search-replace"
+    DIFFXYZ_LIMIT: "20"
+    DIFFXYZ_LANG: "python"
+    DIFFXYZ_EVAL_MAX_TOKENS: "512"
+    DIFFXYZ_OUT: "/workspace/project/result.json"
+    WANDB_RUN_NAME: "qwen2p5-1p5b-diffgen-zero-shot"
+
   sft_smoke_7b_diffgen_solo:
     DIFFXYZ_RUNNER: "sft_smoke"
     DIFFXYZ_BASE_MODEL: "Qwen/Qwen2.5-Coder-7B-Instruct"
