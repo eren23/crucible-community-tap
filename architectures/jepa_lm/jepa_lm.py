@@ -122,10 +122,15 @@ class JepaLM(BaselineGPT):
         total = ce_main
 
         if self.jepa_alpha > 0.0:
-            mse_aux = F.mse_loss(h_pred, h_target)
+            # Normalize before MSE — un-RMSNormed hidden states grow across
+            # layers and produce huge MSE values that drown out CE_main.
+            # Match the val_bpb path which applies final_norm before decoding.
+            h_pred_n = self.final_norm(h_pred)
+            h_target_n = self.final_norm(h_target)
+            mse_aux = F.mse_loss(h_pred_n, h_target_n)
             # VICReg-style variance regularization (matches JEPAObjective at
             # crucible.training.objectives.JEPAObjective lines 184-189).
-            z_std = torch.sqrt(h_pred.float().var(dim=(0, 1)) + 1e-4)
+            z_std = torch.sqrt(h_pred_n.float().var(dim=(0, 1)) + 1e-4)
             vicreg = torch.relu(1.0 - z_std).mean()
             total = total + self.jepa_alpha * (mse_aux + self.jepa_var_weight * vicreg)
             out["jepa_mse"] = mse_aux.detach()
