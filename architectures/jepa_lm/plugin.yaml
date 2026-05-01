@@ -1,17 +1,17 @@
 name: jepa_lm
 type: architectures
-version: 0.1.0
+version: 0.2.0
 description: >
   JEPA-on-LM hybrid for parameter-golf non-record / unlimited-compute track.
-  Standard CE LM head drives val_bpb. Two auxiliary JEPA paths share a small
-  predictor MLP: (A) hidden-state aux JEPA — predict same-layer hidden state
-  k positions ahead, MSE + VICReg variance reg, stop-grad target (no extra
-  encoder, fits 16MB budget); (B) token-decoder JEPA — project the predicted
-  embedding through the tied LM head and apply CE against the actual token
-  k positions ahead. Both paths toggleable via JEPA_ALPHA / JEPA_BETA env
-  vars (set both to 0 for pure baseline behavior). Built on BaselineGPT so
-  all standard parameter-golf augmentations (SmearGate, BigramHash,
-  TrigramHash, U-Net skip, GQA, ortho init) remain available.
+  v0.2 informed by parameter-golf community PRs (#832, #896, #1330, #1556,
+  #1581): defaults dropped 40x to lambda ~= 0.005, off-diagonal covariance
+  penalty (V-JEPA) opt-in, predictor injection mode opt-in. Standard CE LM
+  head still drives val_bpb. Path A = hidden-state aux MSE (+ VICReg variance
+  + optional covariance). Path B = token-decoder CE through tied LM head.
+  Injection mode = zero-init project predicted latent into hidden stream so
+  JEPA contributes a feature, not just a side loss (PR #832 winner pattern).
+  All JEPA components zero-initialized so JEPA_ALPHA=JEPA_BETA=0,
+  JEPA_INJECTION=0 recovers BaselineGPT numerics exactly.
 author: eren23
 tags:
   - architecture
@@ -20,11 +20,15 @@ tags:
   - non-record
   - lm-aux-loss
   - token-decoder-jepa
+  - v-jepa-covariance
+  - predictor-injection
   - feature-prediction
 config:
   MODEL_FAMILY: jepa_lm
-  JEPA_ALPHA: 0.1
-  JEPA_BETA: 0.05
+  JEPA_ALPHA: 0.005
+  JEPA_BETA: 0.005
   JEPA_VAR_WEIGHT: 0.1
+  JEPA_COVAR_WEIGHT: 0.0
   JEPA_CHUNK: 8
   JEPA_PREDICTOR_DIM: 64
+  JEPA_INJECTION: 0
