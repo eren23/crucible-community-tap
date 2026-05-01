@@ -95,10 +95,6 @@ class JepaLM(BaselineGPT):
             self.jepa_predictor[0].weight,
             std=1.0 / math.sqrt(d),
         )
-        # Per-step JEPA metric scratch — read by torch_backend's train loop
-        # (when present) to surface component losses in W&B without
-        # requiring callbacks to be configured.
-        self._last_jepa_metrics: dict[str, float] = {}
 
     def _components(
         self,
@@ -134,8 +130,6 @@ class JepaLM(BaselineGPT):
             total = total + self.jepa_alpha * (mse_aux + self.jepa_var_weight * vicreg)
             out["jepa_mse"] = mse_aux.detach()
             out["jepa_vicreg"] = vicreg.detach()
-            self._last_jepa_metrics["jepa_mse"] = float(mse_aux.detach().item())
-            self._last_jepa_metrics["jepa_vicreg"] = float(vicreg.detach().item())
 
         if self.jepa_beta > 0.0:
             # Token-decoder JEPA: decode predicted embedding through tied LM head.
@@ -155,11 +149,8 @@ class JepaLM(BaselineGPT):
             )
             total = total + self.jepa_beta * ce_jepa
             out["jepa_token_ce"] = ce_jepa.detach()
-            self._last_jepa_metrics["jepa_token_ce"] = float(ce_jepa.detach().item())
 
         out["loss"] = total
-        self._last_jepa_metrics["jepa_total"] = float(total.detach().item())
-        self._last_jepa_metrics["jepa_ce_main"] = float(ce_main.detach().item())
         return out
 
     def forward(
