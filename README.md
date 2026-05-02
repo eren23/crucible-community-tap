@@ -14,7 +14,7 @@ Community plugins, tools, and research findings for the
 | [`collectors/`](collectors/) | 1 | Git edit → AST token pipelines |
 | [`launchers/`](launchers/) | 4 | End-to-end training scripts |
 | [`evaluation/`](evaluation/) | — | Reusable eval tools |
-| [`findings/`](findings/) | 1 | Documented research findings |
+| [`findings/`](findings/) | 2 | Documented research findings |
 | [`attocode_integration/`](attocode_integration/) | — | Tools for Attocode + Synapse integration |
 
 ## Quick Start

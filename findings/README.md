@@ -14,6 +14,7 @@ interpretable by someone who didn't run the experiments.
 | Topic | Claim |
 |-------|-------|
 | [code_wm_transition_geometry](code_wm_transition_geometry/README.md) | Code world models need both state geometry (SIGReg) and transition geometry (delta-direction) — the G8 hybrid recipe is what works. |
+| [sfumato_three_axes](sfumato_three_axes/README.md) | Hybrid AR / DDLM reasoning fails along three orthogonal axes (interface-format brittleness, planner-content trust, sampling-diversity preservation); two are trainably fixable, the third is characterized but not fixed. cmajc-v3 = 82.5% on GSM8K-test for ~$3.50 of compute. |
 
 ## How to add a finding
 

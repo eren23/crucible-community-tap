@@ -1,0 +1,82 @@
+name: sfumato_e2_track2
+description: |
+  Track 2 — Commit adapter for consensus distillation.
+  Smaller LoRA, last 8 layers FFN only. Trained on consensus targets distilled
+  from cmaj branch agreement (eren23/sfumato-consensus-gsm8k). Goal: lift the
+  final commit step without dragging on the rest of the denoiser.
+
+repo: "https://github.com/eren23/sfumato"
+branch: main
+shallow: true
+workspace: /workspace/sfumato
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  gpu_count: 1
+  container_disk: 100
+  volume_disk: 100
+  interruptible: true
+
+python: "3.11"
+
+install_torch: "torch==2.4.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu121"
+install:
+  - "transformers==4.46.3"
+  - "peft>=0.13"
+  - "accelerate>=0.34"
+  - "datasets>=2.20"
+  - "huggingface_hub"
+  - "wandb"
+  - "bitsandbytes"
+  - "numpy"
+
+setup:
+  - "python scripts/freeze_gsm8k.py"
+
+train: >-
+  LORA_R=${LORA_R:-8}
+  LORA_ALPHA=${LORA_ALPHA:-16}
+  LR=${LR:-5e-5}
+  EPOCHS=${EPOCHS:-4}
+  BATCH_SIZE=${BATCH_SIZE:-1}
+  GRAD_ACCUM=${GRAD_ACCUM:-4}
+  WARMUP_STEPS=${WARMUP_STEPS:-20}
+  SEED=${SEED:-42}
+  HF_DATASET_ID=${HF_DATASET_ID:-eren23/sfumato-commit-mixture-gsm8k}
+  HF_OUTPUT_REPO=${HF_OUTPUT_REPO:-eren23/sfumato-llada-commit}
+  WANDB_RUN_NAME=${WANDB_RUN_NAME:-track2-commit-mix-v1}
+  SAVE_DIR=/workspace/track2_lora
+  python scripts/train_track2_commit.py
+
+timeout: 14400  # 4 hours; smaller LoRA + fewer epochs than Track 1
+
+env_forward:
+  - WANDB_API_KEY
+  - WANDB_ENTITY
+  - HUGGINGFACE_HUB_TOKEN
+
+env_set:
+  WANDB_PROJECT: sfumato-e2
+  WANDB_MODE: online
+  HF_HOME: /workspace/.hf_cache
+  TRANSFORMERS_CACHE: /workspace/.hf_cache
+  PYTHONUNBUFFERED: "1"
+
+env_defaults:
+  LORA_R: "8"
+  LORA_ALPHA: "16"
+  LR: "5e-5"
+  EPOCHS: "4"
+  BATCH_SIZE: "1"
+  GRAD_ACCUM: "4"
+  WARMUP_STEPS: "20"
+  SEED: "42"
+  HF_DATASET_ID: "eren23/sfumato-commit-mixture-gsm8k"
+  HF_OUTPUT_REPO: "eren23/sfumato-llada-commit"
+  WANDB_RUN_NAME: "track2-commit-mix-v1"
+
+metrics:
+  source: stdout
+  primary: val_loss
+  direction: minimize

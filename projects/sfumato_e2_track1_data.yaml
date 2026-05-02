@@ -1,0 +1,67 @@
+name: sfumato_e2_track1_data
+description: |
+  Track 1 — DATASET BUILD step (separate from training).
+  Generates prefix-randomized GSM8K dataset using Qwen2.5-{0.5B,1.5B,7B}-Instruct
+  greedy plans + 5 deterministic tiers. Pushes to eren23/sfumato-prefix-robust-gsm8k.
+
+repo: "https://github.com/eren23/sfumato"
+branch: main
+shallow: true
+workspace: /workspace/sfumato
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  gpu_count: 1
+  container_disk: 100
+  volume_disk: 100
+  interruptible: true
+
+python: "3.11"
+
+install_torch: "torch==2.4.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu121"
+install:
+  - "transformers==4.46.3"
+  - "peft>=0.13"
+  - "accelerate>=0.34"
+  - "datasets>=2.20"
+  - "huggingface_hub"
+  - "wandb"
+  - "numpy"
+
+setup:
+  - "python scripts/freeze_gsm8k.py"
+
+train: >-
+  N_TRAIN=${N_TRAIN:-7473}
+  SEED=${SEED:-42}
+  REPO_ID=${REPO_ID:-eren23/sfumato-prefix-robust-gsm8k}
+  python scripts/build_prefix_robust_dataset.py
+  --n_train ${N_TRAIN:-7473}
+  --seed ${SEED:-42}
+  --push True
+  --repo_id ${REPO_ID:-eren23/sfumato-prefix-robust-gsm8k}
+
+timeout: 14400  # 4 hours; cap for spot
+
+env_forward:
+  - WANDB_API_KEY
+  - WANDB_ENTITY
+  - HUGGINGFACE_HUB_TOKEN
+
+env_set:
+  WANDB_PROJECT: sfumato-e2
+  WANDB_MODE: online
+  HF_HOME: /workspace/.hf_cache
+  TRANSFORMERS_CACHE: /workspace/.hf_cache
+  PYTHONUNBUFFERED: "1"
+
+env_defaults:
+  N_TRAIN: "7473"
+  SEED: "42"
+  REPO_ID: "eren23/sfumato-prefix-robust-gsm8k"
+
+metrics:
+  source: stdout
+  primary: val_loss
+  direction: minimize

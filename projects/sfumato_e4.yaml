@@ -1,0 +1,104 @@
+name: sfumato_e4
+description: |
+  Sfumato E4 — AR vs diffusion vs hybrid CoT on GSM8K.
+  Reproduces every condition in the paper "Three Orthogonal Failure Axes
+  in Hybrid AR / Diffusion Reasoning" (eren23/sfumato_paper).
+
+  Conditions (set via CONDITION env var):
+    c1     pure AR (Qwen alone)
+    c2     pure diffusion (LLaDA alone, no prefix)
+    c2c    LLaDA + commit-LoRA (single-pass, last sub-block for v2 / sub-blocks 2-4 for v3)
+    c3     AR plan -> LLaDA-conditioned-on-plan -> answer extraction
+    c3p    same as c3 but with explicit Plan: prefix
+    c4     c3 + extra AR-extend / diffuse-again round
+    cmaj   5 stochastic LLaDA branches, majority vote (b=5, t=0.7)
+    cmajc  cmaj with commit-LoRA enabled per branch, then majority vote
+
+  Headline reproduction (cmajc-v3 = 82.5% on N=200, GSM8K-test):
+    CONDITION=cmajc K_STEPS=64 N_PROBLEMS=200 SEED=0
+    LORA_PATH=eren23/sfumato-llada-prefix-robust-v3
+    COMMIT_LORA_PATH=eren23/sfumato-llada-commit-v3
+    COMMIT_N_BLOCKS=3 BRANCHES=5 TEMP=0.7
+  Wall: ~70 min on RTX-4090 non-interruptible. Cost: ~$0.25.
+
+repo: "https://github.com/eren23/sfumato"
+branch: main
+shallow: true
+workspace: /workspace/sfumato
+
+pod:
+  gpu_type: "NVIDIA GeForce RTX 4090"
+  gpu_count: 1
+  container_disk: 60       # 16 GB LLaDA + 1 GB Qwen + HF cache + venv
+  volume_disk: 0
+  # NOTE: cmajc runs > 30 min — set interruptible=false at provision time to
+  # avoid spot preemption (LLaDA shards take ~40s to download per cold boot).
+  interruptible: true
+
+python: "3.11"
+
+install_torch: "torch==2.4.0"
+install_flags: "--index-url https://download.pytorch.org/whl/cu121"
+install:
+  - "transformers==4.46.3"     # newer transformers break LLaDA's LLaDALlamaBlock loader
+  - "peft>=0.13"
+  - "accelerate>=0.34.0"
+  - "datasets>=2.20.0"
+  - "huggingface_hub"
+  - "wandb"
+  - "numpy"
+
+setup:
+  - "python scripts/freeze_gsm8k.py"
+
+train: >-
+  CONDITION=${CONDITION:-c1}
+  K_STEPS=${K_STEPS:-0}
+  N_PROBLEMS=${N_PROBLEMS:-5}
+  SEED=${SEED:-0}
+  AR_MODEL=${AR_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}
+  DIFF_MODEL=${DIFF_MODEL:-GSAI-ML/LLaDA-8B-Instruct}
+  LORA_PATH=${LORA_PATH:-}
+  COMMIT_LORA_PATH=${COMMIT_LORA_PATH:-}
+  COMMIT_N_BLOCKS=${COMMIT_N_BLOCKS:-1}
+  BRANCHES=${BRANCHES:-1}
+  TEMP=${TEMP:-0.0}
+  MOCK_MODELS=${MOCK_MODELS:-0}
+  python e4/runner.py
+
+timeout: 7200
+
+env_forward:
+  - WANDB_API_KEY
+  - WANDB_ENTITY
+  - HUGGINGFACE_HUB_TOKEN
+
+env_set:
+  WANDB_PROJECT: sfumato-e4
+  WANDB_MODE: online
+  HF_HOME: /workspace/sfumato/.hf_cache
+  TRANSFORMERS_CACHE: /workspace/sfumato/.hf_cache
+  # PEFT adapter switching in cmajc inner loop accumulates GPU memory and
+  # OOMs around problem 144/200 on a 24 GB 4090 without expandable_segments.
+  # See findings/sfumato_three_axes/MASTER_TABLE.md for the trace.
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+
+env_defaults:
+  CONDITION: "c1"
+  K_STEPS: "0"
+  N_PROBLEMS: "5"
+  SEED: "0"
+  AR_MODEL: Qwen/Qwen2.5-0.5B-Instruct
+  DIFF_MODEL: GSAI-ML/LLaDA-8B-Instruct
+  LORA_PATH: ""
+  COMMIT_LORA_PATH: ""
+  COMMIT_N_BLOCKS: "1"
+  BRANCHES: "1"
+  TEMP: "0.0"
+  MOCK_MODELS: "0"
+
+metrics:
+  source: stdout
+  primary: val_loss          # 1 - accuracy, so leaderboard min-loss = max-accuracy
+  direction: minimize
+  also_track: [accuracy, flops_used, k_steps, condition]
